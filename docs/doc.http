@@ -144,6 +144,67 @@ Content-Type: application/pdf
 --WebAppBoundary--
 
 ###
+# 4.2) Pipeline Gemini upload com content-type genérico (octet-stream) - PDF
+# Testa autodetecção de tipo pelo conteúdo do arquivo (sem mime_type no form-data).
+POST {{baseUrl}}/extrair-medico-gemini/upload
+Content-Type: multipart/form-data; boundary=WebAppBoundaryOctetPdf
+Accept: application/json
+
+--WebAppBoundaryOctetPdf
+Content-Disposition: form-data; name="pagina"
+
+0
+--WebAppBoundaryOctetPdf
+Content-Disposition: form-data; name="max_candidatos"
+
+2
+--WebAppBoundaryOctetPdf
+Content-Disposition: form-data; name="retornar_imagem_base64"
+
+false
+--WebAppBoundaryOctetPdf
+Content-Disposition: form-data; name="retornar_imagem_url"
+
+false
+--WebAppBoundaryOctetPdf
+Content-Disposition: form-data; name="file"; filename="upload.bin"
+Content-Type: application/octet-stream
+
+< ./arquivo3.pdf
+--WebAppBoundaryOctetPdf--
+
+###
+# 4.3) Pipeline Gemini upload com content-type genérico (octet-stream) - IMAGEM
+# Testa autodetecção quando o fluxo envia imagem binária.
+# Troque `./sua-imagem.png` por um arquivo real (PNG/JPG/TIFF) no diretório `docs/`.
+POST {{baseUrl}}/extrair-medico-gemini/upload
+Content-Type: multipart/form-data; boundary=WebAppBoundaryOctetImg
+Accept: application/json
+
+--WebAppBoundaryOctetImg
+Content-Disposition: form-data; name="pagina"
+
+0
+--WebAppBoundaryOctetImg
+Content-Disposition: form-data; name="max_candidatos"
+
+2
+--WebAppBoundaryOctetImg
+Content-Disposition: form-data; name="retornar_imagem_base64"
+
+false
+--WebAppBoundaryOctetImg
+Content-Disposition: form-data; name="retornar_imagem_url"
+
+false
+--WebAppBoundaryOctetImg
+Content-Disposition: form-data; name="file"; filename="upload-image.bin"
+Content-Type: application/octet-stream
+
+< ./sua-imagem.png
+--WebAppBoundaryOctetImg--
+
+###
 # 5) Teste de validação (erro esperado 422)
 POST {{baseUrl}}/extrair-carimbo
 Content-Type: application/json
@@ -168,3 +229,5 @@ Accept: application/json
 # - se retornar_imagem_url=true, abra carimbo_url/imagem_debug_url no navegador.
 # - para produção com n8n, prefira os endpoints `/upload` e deixe imagens desligadas:
 #   retornar_imagem_base64=false e retornar_imagem_url=false.
+# - com upload binário, mime_type no form-data é opcional; o backend tenta identificar
+#   PDF/PNG/JPEG/TIFF automaticamente pelo conteúdo (inclusive com application/octet-stream).

@@ -188,7 +188,19 @@ def _resolve_upload_mime_type(
     *,
     upload: UploadFile,
     mime_type_override: Optional[str],
+    file_bytes: bytes,
 ) -> str:
+    def _detect_mime_by_signature(raw: bytes) -> Optional[str]:
+        if raw.startswith(b"%PDF-"):
+            return "application/pdf"
+        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if raw.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if raw.startswith((b"II*\x00", b"MM\x00*")):
+            return "image/tiff"
+        return None
+
     candidate = (mime_type_override or upload.content_type or "").strip().lower()
     if candidate in SUPPORTED_MIME_TYPES:
         return candidate
@@ -201,10 +213,17 @@ def _resolve_upload_mime_type(
     if candidate in {"application/octet-stream", "binary/octet-stream"} and filename.endswith(".pdf"):
         return "application/pdf"
 
+    by_signature = _detect_mime_by_signature(file_bytes[:32])
+    if by_signature and by_signature in SUPPORTED_MIME_TYPES:
+        return by_signature
+
     allowed = ", ".join(sorted(SUPPORTED_MIME_TYPES))
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=f"mime_type inválido para upload. Use um dos suportados: {allowed}",
+        detail=(
+            "mime_type inválido para upload. "
+            f"Use um dos suportados: {allowed}, ou envie um arquivo PDF/PNG/JPEG/TIFF válido."
+        ),
     )
 
 
@@ -511,6 +530,7 @@ async def extract_stamp_upload(
     resolved_mime_type = _resolve_upload_mime_type(
         upload=file,
         mime_type_override=mime_type,
+        file_bytes=file_bytes,
     )
     image = _load_input_image(
         file_bytes=file_bytes,
@@ -633,6 +653,7 @@ async def debug_visualize_upload(
     resolved_mime_type = _resolve_upload_mime_type(
         upload=file,
         mime_type_override=mime_type,
+        file_bytes=file_bytes,
     )
     image = _load_input_image(
         file_bytes=file_bytes,
@@ -1166,6 +1187,7 @@ async def extract_medico_with_gemini_upload(
     resolved_mime_type = _resolve_upload_mime_type(
         upload=file,
         mime_type_override=mime_type,
+        file_bytes=file_bytes,
     )
     payload = GeminiExtractRequest(
         arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),

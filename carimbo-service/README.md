@@ -295,6 +295,9 @@ Para usar binário direto (sem base64) no n8n, configure o node `HTTP Request`:
   - `retornar_imagem_url=false`
   - `max_candidatos` apenas para `/extrair-medico-gemini/upload`
 
+Observação: se o n8n enviar `application/octet-stream`, o backend tenta detectar automaticamente
+se o binário é PDF/PNG/JPEG/TIFF pelo conteúdo do arquivo.
+
 Endpoints recomendados para n8n:
 
 - `POST /extrair-carimbo/upload`
