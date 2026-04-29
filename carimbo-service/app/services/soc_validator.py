@@ -86,6 +86,15 @@ def _build_crm_suffix_variants(crm_numero: str) -> list[str]:
     return [f"{crm_numero}{digit}" for digit in "0123456789"]
 
 
+def _build_crm_prefix_variants(crm_numero: str) -> list[str]:
+    if not _CRM_ONLY_DIGITS_RE.match(crm_numero):
+        return []
+    if len(crm_numero) >= 8:
+        return []
+    # Em alguns casos o OCR perde o primeiro dígito do CRM.
+    return [f"{digit}{crm_numero}" for digit in "0123456789"]
+
+
 def _should_try_suffix_recovery(
     *,
     validation: SocValidationResult,
@@ -105,7 +114,7 @@ def _should_try_suffix_recovery(
     return True
 
 
-def _attempt_suffix_recovery(
+def _attempt_crm_variants_recovery(
     *,
     base_url: str,
     empresa: str,
@@ -117,8 +126,8 @@ def _attempt_suffix_recovery(
     crm_uf: Optional[str],
     nome_detectado: Optional[str],
     threshold: float,
+    variants: list[str],
 ) -> tuple[Optional[SocValidationResult], int, str]:
-    variants = _build_crm_suffix_variants(crm_numero)
     if not variants:
         return None, 0, ""
 
@@ -181,6 +190,37 @@ def _attempt_suffix_recovery(
             break
 
     return best_variant_result, attempts, "; ".join(errors[:2])
+
+
+def _is_variant_result_meaningful(
+    *,
+    initial_result: SocValidationResult,
+    variant_result: SocValidationResult,
+    crm_uf: Optional[str],
+    nome_detectado: Optional[str],
+    threshold: float,
+) -> bool:
+    common_tokens = _count_common_name_tokens(
+        nome_detectado,
+        variant_result.melhor_nome_soc,
+    )
+    variant_name_acceptable = (
+        variant_result.nome_parecido
+        or (
+            common_tokens >= 2
+            and variant_result.similaridade_nome >= max(0.60, threshold - 0.18)
+        )
+    )
+    score_gain = variant_result.similaridade_nome - initial_result.similaridade_nome
+    fixes_uf = bool(
+        crm_uf
+        and initial_result.melhor_uf_soc != crm_uf
+        and variant_result.melhor_uf_soc == crm_uf
+    )
+    score_gain_ok = (
+        score_gain >= 0.20 if not initial_result.nome_parecido else score_gain >= 0.07
+    )
+    return bool(variant_name_acceptable and (score_gain_ok or fixes_uf))
 
 
 def normalize_person_name(value: Optional[str]) -> str:
@@ -506,7 +546,8 @@ def validate_with_soc(
     ):
         return initial_result
 
-    variant_result, variant_attempts, variant_errors = _attempt_suffix_recovery(
+    suffix_variants = _build_crm_suffix_variants(crm_numero)
+    variant_result, variant_attempts, variant_errors = _attempt_crm_variants_recovery(
         base_url=base_url,
         empresa=empresa,
         codigo=codigo,
@@ -517,45 +558,67 @@ def validate_with_soc(
         crm_uf=crm_uf,
         nome_detectado=nome_detectado,
         threshold=threshold,
+        variants=suffix_variants,
     )
-    if variant_attempts <= 0:
+    total_variant_attempts = variant_attempts
+    variant_error_details = [variant_errors]
+    selected_variant_result: Optional[SocValidationResult] = None
+
+    if (
+        variant_result is not None
+        and _is_variant_result_meaningful(
+            initial_result=initial_result,
+            variant_result=variant_result,
+            crm_uf=crm_uf,
+            nome_detectado=nome_detectado,
+            threshold=threshold,
+        )
+    ):
+        selected_variant_result = variant_result
+    else:
+        # Se não houver sugestão pela perda de dígito final, tenta perda de dígito inicial.
+        prefix_variants = _build_crm_prefix_variants(crm_numero)
+        prefix_result, prefix_attempts, prefix_errors = _attempt_crm_variants_recovery(
+            base_url=base_url,
+            empresa=empresa,
+            codigo=codigo,
+            chave=chave,
+            tipo_saida=tipo_saida,
+            timeout_seconds=timeout_seconds,
+            crm_numero=crm_numero,
+            crm_uf=crm_uf,
+            nome_detectado=nome_detectado,
+            threshold=threshold,
+            variants=prefix_variants,
+        )
+        total_variant_attempts += prefix_attempts
+        variant_error_details.append(prefix_errors)
+        if (
+            prefix_result is not None
+            and _is_variant_result_meaningful(
+                initial_result=initial_result,
+                variant_result=prefix_result,
+                crm_uf=crm_uf,
+                nome_detectado=nome_detectado,
+                threshold=threshold,
+            )
+        ):
+            selected_variant_result = prefix_result
+
+    if total_variant_attempts <= 0:
         return initial_result
 
     result_with_attempts = replace(
         initial_result,
-        variacoes_crm_consultadas=variant_attempts,
-        erro=_compose_error_details(initial_result.erro, variant_errors),
+        variacoes_crm_consultadas=total_variant_attempts,
+        erro=_compose_error_details(initial_result.erro, *variant_error_details),
     )
 
-    if variant_result is None:
+    if selected_variant_result is None:
         return result_with_attempts
 
-    common_tokens = _count_common_name_tokens(
-        nome_detectado,
-        variant_result.melhor_nome_soc,
-    )
-    variant_name_acceptable = (
-        variant_result.nome_parecido
-        or (
-            common_tokens >= 2
-            and variant_result.similaridade_nome >= max(0.60, threshold - 0.18)
-        )
-    )
-    score_gain = variant_result.similaridade_nome - initial_result.similaridade_nome
-    fixes_uf = bool(
-        crm_uf
-        and initial_result.melhor_uf_soc != crm_uf
-        and variant_result.melhor_uf_soc == crm_uf
-    )
-    score_gain_ok = (
-        score_gain >= 0.20 if not initial_result.nome_parecido else score_gain >= 0.07
-    )
-    variant_is_meaningful = bool(variant_name_acceptable and (score_gain_ok or fixes_uf))
-    if not variant_is_meaningful:
-        return result_with_attempts
-
-    crm_numero_sugerido = variant_result.crm_consultado
-    crm_uf_sugerida = variant_result.melhor_uf_soc
+    crm_numero_sugerido = selected_variant_result.crm_consultado
+    crm_uf_sugerida = selected_variant_result.melhor_uf_soc
     crm_sugerido = _compose_crm(crm_numero_sugerido, crm_uf_sugerida)
     return replace(
         result_with_attempts,
@@ -565,6 +628,6 @@ def validate_with_soc(
         crm_numero_sugerido=crm_numero_sugerido,
         crm_uf_sugerida=crm_uf_sugerida,
         crm_sugerido=crm_sugerido,
-        nome_sugerido_soc=variant_result.melhor_nome_soc,
-        similaridade_nome_sugerida=variant_result.similaridade_nome,
+        nome_sugerido_soc=selected_variant_result.melhor_nome_soc,
+        similaridade_nome_sugerida=selected_variant_result.similaridade_nome,
     )

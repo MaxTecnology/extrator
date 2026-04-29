@@ -175,3 +175,72 @@ def test_validate_with_soc_suggests_suffix_when_crm_looks_truncated(monkeypatch)
     assert result.revisao_humana_recomendada is True
     assert result.motivo == "soc_sugere_crm_truncado_por_nome_compativel"
     assert result.variacoes_crm_consultadas > 0
+
+
+def test_validate_with_soc_suggests_prefix_when_missing_digit_is_at_start(
+    monkeypatch,
+) -> None:
+    def fake_query_soc_by_crm(
+        *,
+        base_url: str,
+        empresa: str,
+        codigo: str,
+        chave: str,
+        tipo_saida: str,
+        crm_numero: str,
+        timeout_seconds: int,
+    ) -> list[SocRecord]:
+        if crm_numero == "68072":
+            return [
+                SocRecord(
+                    cd_pessoa="999001",
+                    nm_pessoa="Outra Pessoa",
+                    cd_cpf="",
+                    cd_conselho="CRM",
+                    nm_conselho="68072",
+                    sg_ufconselho="SP",
+                    cd_usuario="900001",
+                )
+            ]
+        if crm_numero == "268072":
+            return [
+                SocRecord(
+                    cd_pessoa="127519",
+                    nm_pessoa="Rafael Cruz Jandaia",
+                    cd_cpf="",
+                    cd_conselho="CRM",
+                    nm_conselho="268072",
+                    sg_ufconselho="PE",
+                    cd_usuario="323794",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(
+        "app.services.soc_validator.query_soc_by_crm",
+        fake_query_soc_by_crm,
+    )
+
+    result = validate_with_soc(
+        enabled=True,
+        crm_numero="68072",
+        crm_uf="PE",
+        nome_detectado="Rafaela Cruz Jandaia",
+        threshold=0.78,
+        base_url="https://ws1.soc.com.br/WebSoc/exportadados",
+        empresa="710",
+        codigo="3001",
+        chave="abc",
+        tipo_saida="json",
+        timeout_seconds=5,
+    )
+    assert result.consulted is True
+    assert result.correcao_sugerida is True
+    assert result.crm_numero_sugerido == "268072"
+    assert result.crm_uf_sugerida == "PE"
+    assert result.crm_sugerido == "268072/PE"
+    assert result.nome_sugerido_soc == "Rafael Cruz Jandaia"
+    assert result.revisao_humana_recomendada is True
+    assert result.motivo == "soc_sugere_crm_truncado_por_nome_compativel"
+    # 10 tentativas de sufixo + tentativas de prefixo até encontrar "2".
+    assert result.variacoes_crm_consultadas > 10
