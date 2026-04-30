@@ -13,6 +13,13 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from app.config import Settings, get_settings
 from app.schemas.carimbo import (
+    AsoGeralExtractRequest,
+    AsoGeralExtractResponse,
+    AsoEmpresaInfo,
+    AsoExameInfo,
+    AsoFuncionarioInfo,
+    AsoParecerInfo,
+    AsoRiscosInfo,
     BBox,
     DebugResponse,
     ErrorResponse,
@@ -37,6 +44,7 @@ from app.services.gemini_pipeline import (
     build_stamp_crop_variants,
     combined_candidate_score,
     detect_stamp_candidates_with_gemini,
+    extract_aso_general_with_gemini,
     extract_medico_with_gemini,
     probe_gemini_model,
 )
@@ -319,7 +327,9 @@ def _build_gemini_telemetry(events: list[dict[str, object]]) -> GeminiTelemetryI
         1 for item in events if str(item.get("stage", "")).lower() == "detection"
     )
     extraction_calls = sum(
-        1 for item in events if str(item.get("stage", "")).lower() == "extraction"
+        1
+        for item in events
+        if str(item.get("stage", "")).lower() in {"extraction", "aso_general"}
     )
     return GeminiTelemetryInfo(
         chamadas_total=len(events),
@@ -331,6 +341,37 @@ def _build_gemini_telemetry(events: list[dict[str, object]]) -> GeminiTelemetryI
         latencia_total_ms=latency_total_ms,
         tentativas_total=attempts_total,
     )
+
+
+def _build_aso_review_flags(aso_payload: dict[str, dict[str, str]]) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+
+    empresa = aso_payload.get("empresa", {})
+    funcionario = aso_payload.get("funcionario", {})
+    exame = aso_payload.get("exame", {})
+    parecer = aso_payload.get("parecer", {})
+
+    critical_fields: list[tuple[str, str]] = [
+        ("empresa.razao_social", empresa.get("razao_social", "")),
+        ("empresa.cnpj", empresa.get("cnpj", "")),
+        ("funcionario.nome", funcionario.get("nome", "")),
+        ("funcionario.cpf", funcionario.get("cpf", "")),
+        ("exame.tipo", exame.get("tipo", "")),
+        ("exame.data_aso", exame.get("data_aso", "")),
+        ("parecer.geral", parecer.get("geral", "")),
+    ]
+    for field_name, field_value in critical_fields:
+        value = str(field_value or "").strip()
+        if value in {"", "**", "Ausente"}:
+            reasons.append(f"campo_critico_incompleto:{field_name}")
+
+    cpf = str(funcionario.get("cpf", "") or "").strip()
+    if cpf not in {"", "**", "Ausente"}:
+        digits = "".join(char for char in cpf if char.isdigit())
+        if len(digits) != 11:
+            reasons.append("cpf_formato_duvidoso")
+
+    return bool(reasons), reasons
 
 
 def _clamp_ratio(value: float, minimum: float, maximum: float) -> float:
@@ -703,6 +744,144 @@ async def debug_visualize_upload(
         regiao_fallback=not detection.found,
         motivo=detection.reason,
     )
+
+
+@router.post(
+    "/extrair-aso-geral",
+    response_model=AsoGeralExtractResponse,
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def extract_aso_geral_pipeline(
+    payload: AsoGeralExtractRequest,
+    settings: Settings = Depends(get_settings),
+) -> AsoGeralExtractResponse:
+    if not settings.gemini_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GEMINI_API_KEY não configurada",
+        )
+
+    file_bytes = _decode_file(payload.arquivo_base64)
+    _enforce_file_size(file_bytes, settings.max_file_size_mb)
+    image = _load_input_image(file_bytes, payload.mime_type, payload.pagina, settings)
+
+    pipeline_started_at = time.monotonic()
+    gemini_usage_events: list[dict[str, object]] = []
+
+    timeout = settings.gemini_timeout_seconds
+    retry_attempts = settings.gemini_retry_attempts
+    retry_backoff_seconds = settings.gemini_retry_backoff_seconds
+    retry_jitter_seconds = settings.gemini_retry_jitter_seconds
+    extraction_retry_attempts = min(
+        int(retry_attempts),
+        max(0, int(settings.gemini_extraction_retry_attempts_cap)),
+    )
+
+    try:
+        aso_payload = extract_aso_general_with_gemini(
+            image=image,
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_extraction_model,
+            timeout_seconds=timeout,
+            retry_attempts=extraction_retry_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
+            retry_jitter_seconds=retry_jitter_seconds,
+            usage_sink=gemini_usage_events,
+        )
+    except GeminiServiceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Erro no Gemini (extração ASO geral): {exc}",
+        ) from exc
+
+    revisao_humana_recomendada, motivos_revisao = _build_aso_review_flags(aso_payload)
+    gemini_telemetria = _build_gemini_telemetry(gemini_usage_events)
+    elapsed_ms = int(max(0, round((time.monotonic() - pipeline_started_at) * 1000)))
+    gemini_telemetria.latencia_total_ms = max(
+        int(gemini_telemetria.latencia_total_ms),
+        elapsed_ms,
+    )
+
+    return AsoGeralExtractResponse(
+        empresa=AsoEmpresaInfo(**aso_payload["empresa"]),
+        funcionario=AsoFuncionarioInfo(**aso_payload["funcionario"]),
+        exame=AsoExameInfo(**aso_payload["exame"]),
+        riscos=AsoRiscosInfo(**aso_payload["riscos"]),
+        parecer=AsoParecerInfo(**aso_payload["parecer"]),
+        origem=payload.origem,
+        drive_item_id=payload.drive_item_id,
+        folder_drive_id=payload.folder_drive_id,
+        folder_name=payload.folder_name,
+        user_code=payload.user_code,
+        folder_path=payload.folder_path,
+        folder_url=payload.folder_url,
+        file_name=payload.file_name,
+        file_web_url=payload.file_web_url,
+        meta_queued_at=payload.meta_queued_at,
+        revisao_humana_recomendada=revisao_humana_recomendada,
+        motivos_revisao=motivos_revisao,
+        gemini_telemetria=gemini_telemetria,
+    )
+
+
+@router.post(
+    "/extrair-aso-geral/upload",
+    response_model=AsoGeralExtractResponse,
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+async def extract_aso_geral_upload(
+    file: UploadFile = File(...),
+    pagina: int = Form(0),
+    mime_type: Optional[str] = Form(None),
+    origem: Optional[str] = Form(None),
+    drive_item_id: Optional[str] = Form(None),
+    folder_drive_id: Optional[str] = Form(None),
+    folder_name: Optional[str] = Form(None),
+    user_code: Optional[str] = Form(None),
+    folder_path: Optional[str] = Form(None),
+    folder_url: Optional[str] = Form(None),
+    file_name: Optional[str] = Form(None),
+    file_web_url: Optional[str] = Form(None),
+    meta_queued_at: Optional[str] = Form(None),
+    settings: Settings = Depends(get_settings),
+) -> AsoGeralExtractResponse:
+    file_bytes = await file.read()
+    _enforce_file_size(file_bytes, settings.max_file_size_mb)
+    resolved_mime_type = _resolve_upload_mime_type(
+        upload=file,
+        mime_type_override=mime_type,
+        file_bytes=file_bytes,
+    )
+    payload = AsoGeralExtractRequest(
+        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+        mime_type=resolved_mime_type,
+        pagina=max(0, int(pagina)),
+        retornar_imagem_base64=False,
+        retornar_imagem_url=False,
+        origem=origem,
+        drive_item_id=drive_item_id,
+        folder_drive_id=folder_drive_id,
+        folder_name=folder_name,
+        user_code=user_code,
+        folder_path=folder_path,
+        folder_url=folder_url,
+        file_name=file_name,
+        file_web_url=file_web_url,
+        meta_queued_at=meta_queued_at,
+    )
+    return extract_aso_geral_pipeline(payload=payload, settings=settings)
 
 
 @router.post(

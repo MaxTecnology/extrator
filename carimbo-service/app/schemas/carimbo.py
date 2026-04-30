@@ -46,6 +46,19 @@ class GeminiExtractRequest(ExtractRequest):
     max_candidatos: int = Field(default=3, ge=1, le=5)
 
 
+class AsoGeralExtractRequest(ExtractRequest):
+    origem: Optional[str] = None
+    drive_item_id: Optional[str] = None
+    folder_drive_id: Optional[str] = None
+    folder_name: Optional[str] = None
+    user_code: Optional[str] = None
+    folder_path: Optional[str] = None
+    folder_url: Optional[str] = None
+    file_name: Optional[str] = None
+    file_web_url: Optional[str] = None
+    meta_queued_at: Optional[str] = None
+
+
 class BBox(BaseModel):
     x: int
     y: int
@@ -167,4 +180,61 @@ class GeminiExtractResponse(BaseModel):
     medico: MedicoInfo
     revisao_humana_recomendada: bool = False
     soc_validacao: SocValidationInfo
+    gemini_telemetria: GeminiTelemetryInfo = Field(default_factory=GeminiTelemetryInfo)
+
+
+class AsoEmpresaInfo(BaseModel):
+    razao_social: str
+    cnpj: str
+
+
+class AsoFuncionarioInfo(BaseModel):
+    nome: str
+    matricula: str
+    cpf: str
+    cargo: str
+    setor: str
+
+
+class AsoExameInfo(BaseModel):
+    tipo: str
+    data_aso: str
+
+
+class AsoRiscosInfo(BaseModel):
+    fisicos: str
+    quimicos: str
+    biologicos: str
+    ergonomicos: str
+    acidentes: str
+
+
+class AsoParecerInfo(BaseModel):
+    geral: str
+    trabalho_altura: str
+    espaco_confinado: str
+    trabalho_eletricidade: str
+    conducao_veiculos: str
+    operacao_maquinas: str
+    manipulacao_alimentos: str
+
+
+class AsoGeralExtractResponse(BaseModel):
+    empresa: AsoEmpresaInfo
+    funcionario: AsoFuncionarioInfo
+    exame: AsoExameInfo
+    riscos: AsoRiscosInfo
+    parecer: AsoParecerInfo
+    origem: Optional[str] = None
+    drive_item_id: Optional[str] = None
+    folder_drive_id: Optional[str] = None
+    folder_name: Optional[str] = None
+    user_code: Optional[str] = None
+    folder_path: Optional[str] = None
+    folder_url: Optional[str] = None
+    file_name: Optional[str] = None
+    file_web_url: Optional[str] = None
+    meta_queued_at: Optional[str] = None
+    revisao_humana_recomendada: bool = False
+    motivos_revisao: list[str] = Field(default_factory=list)
     gemini_telemetria: GeminiTelemetryInfo = Field(default_factory=GeminiTelemetryInfo)

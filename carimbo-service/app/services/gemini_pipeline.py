@@ -52,11 +52,19 @@ UF_BRASIL = {
 CRM_NUM_UF = re.compile(r"(?P<num>\d{4,8})\s*[/-]?\s*(?P<uf>[A-Za-z]{2})")
 CRM_UF_NUM = re.compile(r"(?P<uf>[A-Za-z]{2})\s*[/-]?\s*(?P<num>\d{4,8})")
 CRM_NUMBER_WITH_SEPARATORS = re.compile(r"\d(?:[\d\.\- ]{2,14})\d")
+DATE_DMY_2Y = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{2})\s*$")
 HEADER_OBS_HINTS = (
     "CABECALHO",
     "PCMSO",
     "MEDICO RESPONSAVEL",
 )
+PARECER_ALLOWED_VALUES = {
+    "Apto",
+    "Inapto",
+    "Apto com Restrição",
+    "Não Aplicável",
+    "**",
+}
 
 
 class GeminiServiceError(RuntimeError):
@@ -186,6 +194,7 @@ def _call_gemini(
     retry_jitter_seconds: float,
     usage_sink: Optional[list[dict[str, Any]]] = None,
     usage_stage: str = "",
+    response_schema: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     payload = {
@@ -208,6 +217,8 @@ def _call_gemini(
             "thinkingConfig": {"thinkingBudget": 0},
         },
     }
+    if response_schema is not None:
+        payload["generationConfig"]["responseSchema"] = response_schema
     req = request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
@@ -299,6 +310,238 @@ def _call_gemini(
         raise GeminiServiceError("Gemini não retornou texto.")
 
     return _extract_first_json_object(texts[0])
+
+
+def _normalize_aso_text_field(value: Any, *, default_value: str = "Ausente") -> str:
+    if value is None:
+        return default_value
+    text = str(value).strip()
+    if not text:
+        return default_value
+    return text
+
+
+def _normalize_aso_date_field(value: Any) -> str:
+    text = _normalize_aso_text_field(value, default_value="Ausente")
+    if text in {"**", "Ausente"}:
+        return text
+    match = DATE_DMY_2Y.match(text)
+    if not match:
+        return text
+    dd, mm, yy = match.groups()
+    return f"{int(dd):02d}/{int(mm):02d}/20{yy}"
+
+
+def _normalize_aso_cpf(value: Any) -> str:
+    text = _normalize_aso_text_field(value, default_value="Ausente")
+    if text in {"**", "Ausente"}:
+        return text
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 11:
+        return f"{digits[0:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:11]}"
+    return text
+
+
+def _normalize_aso_parecer(value: Any) -> str:
+    text = _normalize_aso_text_field(value, default_value="**")
+    if text not in PARECER_ALLOWED_VALUES:
+        return "**"
+    return text
+
+
+def _normalize_aso_general_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    empresa = raw_payload.get("empresa")
+    funcionario = raw_payload.get("funcionario")
+    exame = raw_payload.get("exame")
+    riscos = raw_payload.get("riscos")
+    parecer = raw_payload.get("parecer")
+
+    empresa_map = empresa if isinstance(empresa, dict) else {}
+    funcionario_map = funcionario if isinstance(funcionario, dict) else {}
+    exame_map = exame if isinstance(exame, dict) else {}
+    riscos_map = riscos if isinstance(riscos, dict) else {}
+    parecer_map = parecer if isinstance(parecer, dict) else {}
+
+    normalized = {
+        "empresa": {
+            "razao_social": _normalize_aso_text_field(empresa_map.get("razao_social")),
+            "cnpj": _normalize_aso_text_field(empresa_map.get("cnpj")),
+        },
+        "funcionario": {
+            "nome": _normalize_aso_text_field(funcionario_map.get("nome")),
+            "matricula": _normalize_aso_text_field(funcionario_map.get("matricula")),
+            "cpf": _normalize_aso_cpf(funcionario_map.get("cpf")),
+            "cargo": _normalize_aso_text_field(funcionario_map.get("cargo")),
+            "setor": _normalize_aso_text_field(funcionario_map.get("setor")),
+        },
+        "exame": {
+            "tipo": _normalize_aso_text_field(exame_map.get("tipo"), default_value="**"),
+            "data_aso": _normalize_aso_date_field(exame_map.get("data_aso")),
+        },
+        "riscos": {
+            "fisicos": _normalize_aso_text_field(riscos_map.get("fisicos")),
+            "quimicos": _normalize_aso_text_field(riscos_map.get("quimicos")),
+            "biologicos": _normalize_aso_text_field(riscos_map.get("biologicos")),
+            "ergonomicos": _normalize_aso_text_field(riscos_map.get("ergonomicos")),
+            "acidentes": _normalize_aso_text_field(riscos_map.get("acidentes")),
+        },
+        "parecer": {
+            "geral": _normalize_aso_parecer(parecer_map.get("geral")),
+            "trabalho_altura": _normalize_aso_parecer(parecer_map.get("trabalho_altura")),
+            "espaco_confinado": _normalize_aso_parecer(parecer_map.get("espaco_confinado")),
+            "trabalho_eletricidade": _normalize_aso_parecer(
+                parecer_map.get("trabalho_eletricidade")
+            ),
+            "conducao_veiculos": _normalize_aso_parecer(parecer_map.get("conducao_veiculos")),
+            "operacao_maquinas": _normalize_aso_parecer(parecer_map.get("operacao_maquinas")),
+            "manipulacao_alimentos": _normalize_aso_parecer(
+                parecer_map.get("manipulacao_alimentos")
+            ),
+        },
+    }
+    return normalized
+
+
+def extract_aso_general_with_gemini(
+    *,
+    image: Image.Image,
+    api_key: str,
+    model: str,
+    timeout_seconds: int,
+    retry_attempts: int,
+    retry_backoff_seconds: float,
+    retry_jitter_seconds: float,
+    usage_sink: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    prompt = """
+Você é um auditor SST especialista em ASO.
+Extraia APENAS os dados gerais do documento.
+
+NÃO extraia médico, CRM, assinatura ou carimbo.
+
+Retorne SOMENTE JSON válido com esta estrutura:
+{
+  "empresa": {
+    "razao_social": "string",
+    "cnpj": "string"
+  },
+  "funcionario": {
+    "nome": "string",
+    "matricula": "string",
+    "cpf": "string",
+    "cargo": "string",
+    "setor": "string"
+  },
+  "exame": {
+    "tipo": "string",
+    "data_aso": "string"
+  },
+  "riscos": {
+    "fisicos": "string",
+    "quimicos": "string",
+    "biologicos": "string",
+    "ergonomicos": "string",
+    "acidentes": "string"
+  },
+  "parecer": {
+    "geral": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "trabalho_altura": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "espaco_confinado": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "trabalho_eletricidade": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "conducao_veiculos": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "operacao_maquinas": "Apto|Inapto|Apto com Restrição|Não Aplicável|**",
+    "manipulacao_alimentos": "Apto|Inapto|Apto com Restrição|Não Aplicável|**"
+  }
+}
+
+Regras:
+- Não invente valores.
+- Campo ilegível: "**".
+- Campo ausente/vazio: "Ausente".
+- CPF: priorize apenas CPF, formato XXX.XXX.XXX-XX.
+- Data final em DD/MM/AAAA; se vier DD/MM/AA, complete para 20AA.
+- Parecer: use SOMENTE os 5 valores permitidos.
+- Se existir apenas parecer geral, os específicos devem ser "Não Aplicável".
+""".strip()
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "empresa": {
+                "type": "object",
+                "properties": {
+                    "razao_social": {"type": "string"},
+                    "cnpj": {"type": "string"},
+                },
+                "required": ["razao_social", "cnpj"],
+            },
+            "funcionario": {
+                "type": "object",
+                "properties": {
+                    "nome": {"type": "string"},
+                    "matricula": {"type": "string"},
+                    "cpf": {"type": "string"},
+                    "cargo": {"type": "string"},
+                    "setor": {"type": "string"},
+                },
+                "required": ["nome", "matricula", "cpf", "cargo", "setor"],
+            },
+            "exame": {
+                "type": "object",
+                "properties": {
+                    "tipo": {"type": "string"},
+                    "data_aso": {"type": "string"},
+                },
+                "required": ["tipo", "data_aso"],
+            },
+            "riscos": {
+                "type": "object",
+                "properties": {
+                    "fisicos": {"type": "string"},
+                    "quimicos": {"type": "string"},
+                    "biologicos": {"type": "string"},
+                    "ergonomicos": {"type": "string"},
+                    "acidentes": {"type": "string"},
+                },
+                "required": ["fisicos", "quimicos", "biologicos", "ergonomicos", "acidentes"],
+            },
+            "parecer": {
+                "type": "object",
+                "properties": {
+                    "geral": {"type": "string"},
+                    "trabalho_altura": {"type": "string"},
+                    "espaco_confinado": {"type": "string"},
+                    "trabalho_eletricidade": {"type": "string"},
+                    "conducao_veiculos": {"type": "string"},
+                    "operacao_maquinas": {"type": "string"},
+                    "manipulacao_alimentos": {"type": "string"},
+                },
+                "required": [
+                    "geral",
+                    "trabalho_altura",
+                    "espaco_confinado",
+                    "trabalho_eletricidade",
+                    "conducao_veiculos",
+                    "operacao_maquinas",
+                    "manipulacao_alimentos",
+                ],
+            },
+        },
+        "required": ["empresa", "funcionario", "exame", "riscos", "parecer"],
+    }
+    raw_payload = _call_gemini(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        image=image,
+        timeout_seconds=timeout_seconds,
+        retry_attempts=retry_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
+        retry_jitter_seconds=retry_jitter_seconds,
+        usage_sink=usage_sink,
+        usage_stage="aso_general",
+        response_schema=response_schema,
+    )
+    return _normalize_aso_general_payload(raw_payload)
 
 
 def _sanitize_bbox_candidates(

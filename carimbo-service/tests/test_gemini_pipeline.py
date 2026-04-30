@@ -1,4 +1,11 @@
+from PIL import Image
+
 from app.services.gemini_pipeline import (
+    extract_aso_general_with_gemini,
+    _normalize_aso_cpf,
+    _normalize_aso_date_field,
+    _normalize_aso_general_payload,
+    _normalize_aso_parecer,
     bbox_geometry_adjustment,
     build_stamp_crop_variants,
     _extract_first_json_object,
@@ -114,3 +121,85 @@ def test_build_stamp_crop_variants_returns_unique_bboxes() -> None:
     variants = build_stamp_crop_variants((200, 950, 180, 80), width=1200, height=1600)
     assert len(variants) >= 2
     assert len(variants) == len(set(variants))
+
+
+def test_normalize_aso_date_field_completes_two_digit_year() -> None:
+    assert _normalize_aso_date_field("5/3/26") == "05/03/2026"
+    assert _normalize_aso_date_field("25/03/2026") == "25/03/2026"
+
+
+def test_normalize_aso_cpf_formats_digits() -> None:
+    assert _normalize_aso_cpf("37860651874") == "378.606.518-74"
+    assert _normalize_aso_cpf("378.606.518-74") == "378.606.518-74"
+
+
+def test_normalize_aso_parecer_limits_vocab() -> None:
+    assert _normalize_aso_parecer("Apto") == "Apto"
+    assert _normalize_aso_parecer("Marcado") == "**"
+
+
+def test_normalize_aso_payload_fills_missing_fields() -> None:
+    normalized = _normalize_aso_general_payload(
+        {
+            "empresa": {"razao_social": "ACME"},
+            "funcionario": {"nome": "JOAO", "cpf": "11122233344"},
+            "exame": {"tipo": "Admissional", "data_aso": "06/03/26"},
+            "riscos": {"fisicos": "Sem risco declarado"},
+            "parecer": {"geral": "Apto"},
+        }
+    )
+    assert normalized["empresa"]["cnpj"] == "Ausente"
+    assert normalized["funcionario"]["cpf"] == "111.222.333-44"
+    assert normalized["exame"]["data_aso"] == "06/03/2026"
+    assert normalized["riscos"]["quimicos"] == "Ausente"
+    assert normalized["parecer"]["trabalho_altura"] == "**"
+
+
+def test_extract_aso_general_with_gemini_normalizes_output(monkeypatch) -> None:
+    def fake_call_gemini(**_: object) -> dict[str, object]:
+        return {
+            "empresa": {"razao_social": "HERA METAL", "cnpj": "42.089.793/0001-07"},
+            "funcionario": {
+                "nome": "MICHEL DOS SANTOS",
+                "matricula": "1000547/",
+                "cpf": "37860651874",
+                "cargo": "ANALISTA COMERCIAL",
+                "setor": "ADMINISTRATIVO",
+            },
+            "exame": {"tipo": "Admissional", "data_aso": "25/03/26"},
+            "riscos": {
+                "fisicos": "Sem risco declarado",
+                "quimicos": "Sem risco declarado",
+                "biologicos": "Sem risco declarado",
+                "ergonomicos": "Sem risco declarado",
+                "acidentes": "Sem risco declarado",
+            },
+            "parecer": {
+                "geral": "Apto",
+                "trabalho_altura": "Não Aplicável",
+                "espaco_confinado": "Não Aplicável",
+                "trabalho_eletricidade": "Não Aplicável",
+                "conducao_veiculos": "Não Aplicável",
+                "operacao_maquinas": "Não Aplicável",
+                "manipulacao_alimentos": "Não Aplicável",
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.gemini_pipeline._call_gemini",
+        fake_call_gemini,
+    )
+    result = extract_aso_general_with_gemini(
+        image=Image.new("RGB", (300, 400), "white"),
+        api_key="key",
+        model="gemini-2.5-flash",
+        timeout_seconds=20,
+        retry_attempts=1,
+        retry_backoff_seconds=1.0,
+        retry_jitter_seconds=0.1,
+        usage_sink=[],
+    )
+
+    assert result["funcionario"]["cpf"] == "378.606.518-74"
+    assert result["exame"]["data_aso"] == "25/03/2026"
+    assert result["parecer"]["geral"] == "Apto"
