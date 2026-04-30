@@ -436,7 +436,12 @@ def _build_bottom_up_extraction_windows(crop: Image.Image) -> list[tuple[Image.I
         return [(crop, 0.0, "janela_completa")]
 
     windows_spec = [
-        (0.00, 0.56, 0.88, 1.00, 0.12, "janela_rodape_56_88"),
+        # Janela focada no bloco de assinatura/carimbo do médico (lado esquerdo-superior do recorte).
+        (0.00, 0.08, 0.84, 0.74, 0.20, "janela_assinatura_superior_esquerda"),
+        # Janela mais ampla para cobrir variações de layout no rodapé.
+        (0.00, 0.18, 0.90, 0.88, 0.14, "janela_assinatura_central_esquerda"),
+        # Mantém janela inferior para documentos onde o carimbo cai mais abaixo.
+        (0.00, 0.48, 0.88, 1.00, 0.10, "janela_rodape_48_88"),
         (0.00, 0.00, 1.00, 1.00, 0.00, "janela_completa"),
     ]
     windows: list[tuple[Image.Image, float, str]] = []

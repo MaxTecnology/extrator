@@ -48,6 +48,33 @@ def test_normalize_medico_payload_parses_crm_and_validates_uf() -> None:
     assert medico.confidence == 0.88
 
 
+def test_normalize_medico_payload_parses_crm_with_dot_separator() -> None:
+    payload = {
+        "nome": "Lucas Bocalao de Paula",
+        "crm": "CRM-PR: 60.750",
+        "confianca": 0.82,
+    }
+    medico = _normalize_medico_payload(payload)
+    assert medico.crm_numero == "60750"
+    assert medico.crm_uf == "PR"
+    assert medico.crm == "60750/PR"
+    assert medico.valido is True
+
+
+def test_normalize_medico_payload_sanitizes_crm_numero_field() -> None:
+    payload = {
+        "nome": "Lucas Bocalao de Paula",
+        "crm_numero": "60.750",
+        "crm_uf": "PR",
+        "confianca": 0.81,
+    }
+    medico = _normalize_medico_payload(payload)
+    assert medico.crm_numero == "60750"
+    assert medico.crm_uf == "PR"
+    assert medico.crm == "60750/PR"
+    assert medico.valido is True
+
+
 def test_normalize_medico_payload_marks_header_source_as_invalid() -> None:
     payload = {
         "nome": "FLAVIO HISSAO SALVION UETA",

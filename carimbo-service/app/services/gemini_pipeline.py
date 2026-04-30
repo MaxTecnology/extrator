@@ -51,6 +51,7 @@ UF_BRASIL = {
 
 CRM_NUM_UF = re.compile(r"(?P<num>\d{4,8})\s*[/-]?\s*(?P<uf>[A-Za-z]{2})")
 CRM_UF_NUM = re.compile(r"(?P<uf>[A-Za-z]{2})\s*[/-]?\s*(?P<num>\d{4,8})")
+CRM_NUMBER_WITH_SEPARATORS = re.compile(r"\d(?:[\d\.\- ]{2,14})\d")
 HEADER_OBS_HINTS = (
     "CABECALHO",
     "PCMSO",
@@ -361,11 +362,35 @@ def _sanitize_bbox_candidates(
 
 
 def _extract_crm_fields(raw_payload: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    def _sanitize_crm_number(raw_value: Any) -> Optional[str]:
+        if raw_value is None:
+            return None
+        digits = re.sub(r"\D", "", str(raw_value))
+        if not digits:
+            return None
+        if 4 <= len(digits) <= 8:
+            return digits
+        return None
+
+    def _extract_number_from_free_text(text: str) -> Optional[str]:
+        if not text:
+            return None
+        # Prioriza blocos que já parecem um número CRM com separadores OCR (ex: 60.750).
+        for match in CRM_NUMBER_WITH_SEPARATORS.finditer(text):
+            digits = _sanitize_crm_number(match.group(0))
+            if digits:
+                return digits
+        # Fallback: qualquer bloco contínuo de 4-8 dígitos.
+        simple_match = re.search(r"\d{4,8}", text)
+        if simple_match:
+            return simple_match.group(0)
+        return None
+
     crm_numero_raw = raw_payload.get("crm_numero")
     crm_uf_raw = raw_payload.get("crm_uf")
     crm_raw = raw_payload.get("crm")
 
-    crm_numero = None if crm_numero_raw is None else str(crm_numero_raw).strip()
+    crm_numero = _sanitize_crm_number(crm_numero_raw)
     crm_uf = None if crm_uf_raw is None else str(crm_uf_raw).strip().upper()
     crm_text = None if crm_raw is None else str(crm_raw).strip().upper()
 
@@ -373,20 +398,28 @@ def _extract_crm_fields(raw_payload: dict[str, Any]) -> tuple[Optional[str], Opt
         return crm_numero, crm_uf
 
     if crm_text:
-        direct_match = CRM_NUM_UF.search(crm_text)
+        compact_crm_text = re.sub(r"[^A-Z0-9]+", " ", crm_text).strip()
+        direct_match = CRM_NUM_UF.search(compact_crm_text)
         if direct_match:
-            return direct_match.group("num"), direct_match.group("uf").upper()
-        reverse_match = CRM_UF_NUM.search(crm_text)
+            return _sanitize_crm_number(direct_match.group("num")), direct_match.group("uf").upper()
+        reverse_match = CRM_UF_NUM.search(compact_crm_text)
         if reverse_match:
-            return reverse_match.group("num"), reverse_match.group("uf").upper()
+            return _sanitize_crm_number(reverse_match.group("num")), reverse_match.group("uf").upper()
+        crm_num_from_text = _extract_number_from_free_text(crm_text)
+        crm_uf_from_text = None
+        uf_match = re.search(r"\b([A-Z]{2})\b", compact_crm_text)
+        if uf_match:
+            crm_uf_from_text = uf_match.group(1).upper()
+        if crm_num_from_text and crm_uf_from_text:
+            return crm_num_from_text, crm_uf_from_text
 
     combined = f"{crm_numero or ''} {crm_uf or ''}".strip()
     direct_match = CRM_NUM_UF.search(combined)
     if direct_match:
-        return direct_match.group("num"), direct_match.group("uf").upper()
+        return _sanitize_crm_number(direct_match.group("num")), direct_match.group("uf").upper()
     reverse_match = CRM_UF_NUM.search(combined)
     if reverse_match:
-        return reverse_match.group("num"), reverse_match.group("uf").upper()
+        return _sanitize_crm_number(reverse_match.group("num")), reverse_match.group("uf").upper()
     return crm_numero, crm_uf
 
 
@@ -520,6 +553,8 @@ Regras:
 - Se não tiver certeza, use null.
 - confianca entre 0.0 e 1.0.
 - Não retornar markdown.
+- Se CRM vier com separadores (ex: "60.750", "26-807-2"), normalize para somente dígitos
+  em crm_numero (ex: "60750", "268072").
 - PRIORIZE EXCLUSIVAMENTE o médico assinante do RODAPÉ (bloco "MÉDICO ENCARREGADO DO EXAME",
   "Assinatura do Médico", "Carimbo", "CRM" próximo da assinatura).
 - IGNORE médico do cabeçalho/PCMSO. Se só houver médico do cabeçalho visível no recorte,
