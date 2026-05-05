@@ -128,6 +128,11 @@ def test_normalize_aso_date_field_completes_two_digit_year() -> None:
     assert _normalize_aso_date_field("25/03/2026") == "25/03/2026"
 
 
+def test_normalize_aso_date_field_fixes_swapped_day_year_pattern(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.gemini_pipeline._aso_reference_year", lambda: 2026)
+    assert _normalize_aso_date_field("26/03/2020") == "20/03/2026"
+
+
 def test_normalize_aso_cpf_formats_digits() -> None:
     assert _normalize_aso_cpf("37860651874") == "378.606.518-74"
     assert _normalize_aso_cpf("378.606.518-74") == "378.606.518-74"

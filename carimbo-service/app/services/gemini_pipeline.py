@@ -9,6 +9,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import date as calendar_date
 from typing import Any, Optional
 from urllib import error, request
 
@@ -53,6 +54,7 @@ CRM_NUM_UF = re.compile(r"(?P<num>\d{4,8})\s*[/-]?\s*(?P<uf>[A-Za-z]{2})")
 CRM_UF_NUM = re.compile(r"(?P<uf>[A-Za-z]{2})\s*[/-]?\s*(?P<num>\d{4,8})")
 CRM_NUMBER_WITH_SEPARATORS = re.compile(r"\d(?:[\d\.\- ]{2,14})\d")
 DATE_DMY_2Y = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{2})\s*$")
+DATE_DMY_4Y = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 HEADER_OBS_HINTS = (
     "CABECALHO",
     "PCMSO",
@@ -321,13 +323,46 @@ def _normalize_aso_text_field(value: Any, *, default_value: str = "Ausente") -> 
     return text
 
 
+def _aso_reference_year() -> int:
+    return int(time.localtime().tm_year)
+
+
+def _maybe_fix_swapped_aso_date(day: int, month: int, year: int) -> Optional[str]:
+    # Heurística para casos em que o modelo inverte DD e AA:
+    # Ex.: origem "20/03/26" => saída errada "26/03/2020".
+    current_year = _aso_reference_year()
+    if year > (current_year - 4):
+        return None
+
+    swapped_day = year % 100
+    swapped_year = 2000 + day
+    if swapped_day < 1 or swapped_day > 31:
+        return None
+    if swapped_year < (current_year - 1) or swapped_year > (current_year + 2):
+        return None
+
+    try:
+        calendar_date(swapped_year, month, swapped_day)
+    except ValueError:
+        return None
+
+    return f"{swapped_day:02d}/{month:02d}/{swapped_year:04d}"
+
+
 def _normalize_aso_date_field(value: Any) -> str:
     text = _normalize_aso_text_field(value, default_value="Ausente")
     if text in {"**", "Ausente"}:
         return text
     match = DATE_DMY_2Y.match(text)
     if not match:
-        return text
+        match_4y = DATE_DMY_4Y.match(text)
+        if not match_4y:
+            return text
+        dd, mm, yyyy = (int(part) for part in match_4y.groups())
+        corrected = _maybe_fix_swapped_aso_date(dd, mm, yyyy)
+        if corrected is not None:
+            return corrected
+        return f"{dd:02d}/{mm:02d}/{yyyy:04d}"
     dd, mm, yy = match.groups()
     return f"{int(dd):02d}/{int(mm):02d}/20{yy}"
 
