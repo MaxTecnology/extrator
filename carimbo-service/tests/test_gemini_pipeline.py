@@ -1,6 +1,9 @@
 from PIL import Image
 
 from app.services.gemini_pipeline import (
+    GeminiServiceError,
+    _call_gemini,
+    _fit_image_for_gemini,
     extract_aso_general_with_gemini,
     _normalize_aso_cpf,
     _normalize_aso_date_field,
@@ -208,3 +211,42 @@ def test_extract_aso_general_with_gemini_normalizes_output(monkeypatch) -> None:
     assert result["funcionario"]["cpf"] == "378.606.518-74"
     assert result["exame"]["data_aso"] == "25/03/2026"
     assert result["parecer"]["geral"] == "Apto"
+
+
+def test_fit_image_for_gemini_downscales_oversized_image() -> None:
+    oversized = Image.new("RGB", (12000, 9300), "white")
+    fitted = _fit_image_for_gemini(oversized)
+    assert fitted.size[0] <= 2600
+    assert fitted.size[1] <= 2600
+    assert (fitted.size[0] * fitted.size[1]) <= 8_500_000
+
+
+def test_call_gemini_timeout_raises_service_error(monkeypatch) -> None:
+    class DummyRequest:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.full_url = "https://example.com"
+
+    def fake_request(*args: object, **kwargs: object) -> DummyRequest:
+        return DummyRequest(*args, **kwargs)
+
+    def fake_urlopen(*_: object, **__: object) -> object:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("app.services.gemini_pipeline.request.Request", fake_request)
+    monkeypatch.setattr("app.services.gemini_pipeline.request.urlopen", fake_urlopen)
+
+    try:
+        _call_gemini(
+            api_key="key",
+            model="gemini-2.5-flash",
+            prompt="{}",
+            image=Image.new("RGB", (120, 120), "white"),
+            timeout_seconds=3,
+            retry_attempts=0,
+            retry_backoff_seconds=0.1,
+            retry_jitter_seconds=0.0,
+        )
+    except GeminiServiceError as exc:
+        assert "Timeout de leitura no Gemini" in str(exc)
+    else:  # pragma: no cover - proteção defensiva.
+        raise AssertionError("Era esperado GeminiServiceError em timeout.")

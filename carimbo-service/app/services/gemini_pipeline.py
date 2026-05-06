@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import re
+import socket
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -19,6 +20,16 @@ from app.services.detector import BBoxTuple
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:  # pragma: no cover - compatibilidade com versões antigas do Pillow.
+    _RESAMPLE_LANCZOS = Image.LANCZOS
+
+# Evita payloads gigantes para o Gemini (latência alta e timeout em PDFs/imagens muito grandes).
+_GEMINI_IMAGE_MAX_SIDE_PX = 2600
+_GEMINI_IMAGE_MAX_PIXELS = 8_500_000
+_GEMINI_INLINE_PNG_MAX_BYTES = 3_500_000
 
 UF_BRASIL = {
     "AC",
@@ -103,6 +114,53 @@ def _pil_to_png_base64(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def _fit_image_for_gemini(image: Image.Image) -> Image.Image:
+    rgb_image = image.convert("RGB")
+    width, height = rgb_image.size
+    if width <= 0 or height <= 0:
+        return rgb_image
+
+    scale_side = min(1.0, float(_GEMINI_IMAGE_MAX_SIDE_PX) / float(max(width, height)))
+    scale_pixels = min(
+        1.0,
+        (float(_GEMINI_IMAGE_MAX_PIXELS) / float(max(1, width * height))) ** 0.5,
+    )
+    scale = min(scale_side, scale_pixels)
+    if scale >= 0.999:
+        return rgb_image
+
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    return rgb_image.resize((new_width, new_height), resample=_RESAMPLE_LANCZOS)
+
+
+def _pil_to_gemini_inline_data(image: Image.Image) -> dict[str, str]:
+    prepared = _fit_image_for_gemini(image)
+
+    png_buffer = io.BytesIO()
+    prepared.save(png_buffer, format="PNG", optimize=True)
+    png_bytes = png_buffer.getvalue()
+    if len(png_bytes) <= _GEMINI_INLINE_PNG_MAX_BYTES:
+        return {
+            "mime_type": "image/png",
+            "data": base64.b64encode(png_bytes).decode("utf-8"),
+        }
+
+    jpeg_buffer = io.BytesIO()
+    prepared.save(
+        jpeg_buffer,
+        format="JPEG",
+        quality=90,
+        optimize=True,
+        progressive=True,
+        subsampling=0,
+    )
+    return {
+        "mime_type": "image/jpeg",
+        "data": base64.b64encode(jpeg_buffer.getvalue()).decode("utf-8"),
+    }
 
 
 def _extract_first_json_object(raw_text: str) -> dict[str, Any]:
@@ -199,17 +257,13 @@ def _call_gemini(
     response_schema: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    inline_data = _pil_to_gemini_inline_data(image)
     payload = {
         "contents": [
             {
                 "parts": [
                     {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/png",
-                            "data": _pil_to_png_base64(image),
-                        }
-                    },
+                    {"inline_data": inline_data},
                 ]
             }
         ],
@@ -276,6 +330,20 @@ def _call_gemini(
                 time.sleep(sleep_seconds)
                 continue
             raise GeminiServiceError(f"Falha de conexão com Gemini: {exc}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = exc
+            should_retry = attempt < attempts
+            if should_retry:
+                sleep_seconds = (backoff * (2**attempt)) + (random.random() * jitter)
+                logger.warning(
+                    "Timeout de leitura no Gemini (tentativa %s/%s). Retry em %.2fs.",
+                    attempt + 1,
+                    attempts + 1,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            raise GeminiServiceError(f"Timeout de leitura no Gemini: {exc}") from exc
     else:
         raise GeminiServiceError(f"Falha inesperada no Gemini após retries: {last_error}")
 

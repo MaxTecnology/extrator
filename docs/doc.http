@@ -5,8 +5,7 @@
 ### Quando API_KEY_REQUIRED=true, envie X-API-Key nos endpoints protegidos.
 
 @baseUrl = http://localhost:8001
-@apiKey = 
-@arquivoBase64 = 
+@apiKey = {{apiKey}}
 
 ########
 GET {{baseUrl}}/docs
@@ -57,10 +56,10 @@ Content-Disposition: form-data; name="retornar_imagem_url"
 
 false
 --CarimboBoundary
-Content-Disposition: form-data; name="file"; filename="arquivo2.pdf"
+Content-Disposition: form-data; name="file"; filename="arquivo1.pdf"
 Content-Type: application/pdf
 
-< ./arquivo2.pdf
+< ./arquivo1.pdf
 --CarimboBoundary--
 
 ###
@@ -97,10 +96,10 @@ Content-Disposition: form-data; name="retornar_imagem_url"
 
 true
 --DebugBoundary
-Content-Disposition: form-data; name="file"; filename="arquivo2.pdf"
+Content-Disposition: form-data; name="file"; filename="arquivo1.pdf"
 Content-Type: application/pdf
 
-< ./arquivo2.pdf
+< ./arquivo1.pdf
 --DebugBoundary--
 
 ###
@@ -146,10 +145,10 @@ Content-Disposition: form-data; name="retornar_imagem_url"
 
 false
 --WebAppBoundary
-Content-Disposition: form-data; name="file"; filename="arquivo3.pdf"
+Content-Disposition: form-data; name="file"; filename="arquivo1.pdf"
 Content-Type: application/pdf
 
-< ./arquivo3.pdf
+< ./arquivo1.pdf
 --WebAppBoundary--
 
 ###
@@ -180,7 +179,7 @@ false
 Content-Disposition: form-data; name="file"; filename="upload.bin"
 Content-Type: application/octet-stream
 
-< ./arquivo3.pdf
+< ./arquivo1.pdf
 --WebAppBoundaryOctetPdf--
 
 ###
@@ -292,10 +291,10 @@ Content-Disposition: form-data; name="meta_queued_at"
 
 2026-04-30T13:56:09.984Z
 --AsoGeralBoundary
-Content-Disposition: form-data; name="file"; filename="arquivo3.pdf"
+Content-Disposition: form-data; name="file"; filename="arquivo1.pdf"
 Content-Type: application/pdf
 
-< ./arquivo3.pdf
+< ./arquivo1.pdf
 --AsoGeralBoundary--
 
 ###
