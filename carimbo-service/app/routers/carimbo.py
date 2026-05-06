@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from app.config import Settings, get_settings
+from app.security import require_api_key_access
 from app.schemas.carimbo import (
     AsoGeralExtractRequest,
     AsoGeralExtractResponse,
@@ -64,7 +65,11 @@ def _to_bbox_model(bbox: Optional[BBoxTuple]) -> Optional[BBox]:
     return BBox(x=x, y=y, w=w, h=h)
 
 
-@router.get("/health/gemini", response_model=GeminiHealthResponse)
+@router.get(
+    "/health/gemini",
+    response_model=GeminiHealthResponse,
+    dependencies=[Depends(require_api_key_access)],
+)
 def gemini_health(settings: Settings = Depends(get_settings)) -> GeminiHealthResponse:
     timeout = max(3, min(12, int(settings.gemini_timeout_seconds)))
     if not settings.gemini_api_key:
@@ -749,6 +754,7 @@ async def debug_visualize_upload(
 @router.post(
     "/extrair-aso-geral",
     response_model=AsoGeralExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
     responses={
         413: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
@@ -833,6 +839,7 @@ def extract_aso_geral_pipeline(
 @router.post(
     "/extrair-aso-geral/upload",
     response_model=AsoGeralExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
     responses={
         413: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
@@ -887,6 +894,7 @@ async def extract_aso_geral_upload(
 @router.post(
     "/extrair-medico-gemini",
     response_model=GeminiExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
     responses={
         413: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
@@ -1349,6 +1357,7 @@ def extract_medico_with_gemini_pipeline(
 @router.post(
     "/extrair-medico-gemini/upload",
     response_model=GeminiExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
     responses={
         413: {"model": ErrorResponse},
         422: {"model": ErrorResponse},

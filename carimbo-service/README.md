@@ -107,10 +107,10 @@ Passos sugeridos:
 1. Suba este diretório (`carimbo-service`) no seu Git remoto.
 2. No Dockploy, crie o serviço com Docker Compose apontando para `docker-compose.dockploy.yml`.
 3. Cadastre as variáveis de ambiente com base no `.env.dockploy.example`.
-4. Configure pelo menos: `GEMINI_API_KEY`, `SOC_EMPRESA`, `SOC_CODIGO`, `SOC_CHAVE` (se `SOC_ENABLED=true`).
+4. Configure pelo menos: `GEMINI_API_KEY`, `API_KEY_REQUIRED`, `API_KEYS`, `SOC_EMPRESA`, `SOC_CODIGO`, `SOC_CHAVE` (se `SOC_ENABLED=true`).
 5. Faça o deploy e valide:
    - `GET /health`
-   - `GET /health/gemini`
+   - `GET /health/gemini` (com header `X-API-Key` quando `API_KEY_REQUIRED=true`)
 6. No n8n, use os endpoints `/upload` com `multipart/form-data` e deixe:
    - `retornar_imagem_base64=false`
    - `retornar_imagem_url=false`
@@ -155,6 +155,40 @@ Notas operacionais:
 - `SOC_TIPO_SAIDA`: tipo de saída (normalmente `json`).
 - `SOC_TIMEOUT_SECONDS`: timeout da chamada ao SOC.
 - `SOC_NAME_SIMILARITY_THRESHOLD`: limiar (0 a 1) para considerar nome semelhante.
+- `ENVIRONMENT`: ambiente lógico (`dev`, `hml`, `prod`) para separação operacional.
+- `DOCS_ACCESS_MODE`: acesso ao `/docs` e `/openapi.json` (`public`, `protected` ou `disabled`).
+- `API_KEY_REQUIRED`: exige API key nos endpoints protegidos.
+- `API_KEY_HEADER_NAME`: nome do header de autenticação (padrão `X-API-Key`).
+- `API_KEYS`: lista de chaves válidas separadas por vírgula.
+- `API_RATE_LIMIT_ENABLED`: ativa limite de requisições por chave.
+- `API_RATE_LIMIT_REQUESTS`: quantidade máxima de requisições na janela.
+- `API_RATE_LIMIT_WINDOW_SECONDS`: janela do rate limit em segundos.
+
+## Segurança de Acesso
+
+Quando `API_KEY_REQUIRED=true`, os endpoints de maior custo ficam protegidos:
+
+- `GET /health/gemini`
+- `POST /extrair-medico-gemini`
+- `POST /extrair-medico-gemini/upload`
+- `POST /extrair-aso-geral`
+- `POST /extrair-aso-geral/upload`
+
+Comportamento:
+
+- sem header (`X-API-Key`): `401`
+- chave inválida: `403`
+- sem chave configurada com proteção ativa: `503`
+- rate limit excedido: `429`
+
+Observação: com `DOCS_ACCESS_MODE=protected`, `/docs`, `/redoc` e `/openapi.json` exigem API key mesmo que `API_KEY_REQUIRED=false`.
+
+Boas práticas adotadas:
+
+- manter `/health` público para healthcheck interno;
+- usar `DOCS_ACCESS_MODE=disabled` em produção (ou `protected`);
+- usar chaves diferentes por ambiente (`dev`, `hml`, `prod`);
+- fazer rotação trimestral com duas chaves em `API_KEYS` durante a transição.
 
 ## Endpoint /extrair-medico-gemini
 

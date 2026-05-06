@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import Settings, get_settings
 from app.routers.carimbo import router as carimbo_router
 from app.schemas.carimbo import ErrorResponse, HealthResponse
+from app.security import enforce_api_key_access
 
 
 logging.basicConfig(
@@ -32,13 +33,38 @@ artifacts_dir = Path(settings_for_static.image_artifacts_dir)
 artifacts_dir.mkdir(parents=True, exist_ok=True)
 artifacts_prefix = "/" + settings_for_static.image_artifacts_url_prefix.strip("/")
 
-app = FastAPI(title="carimbo-service")
+docs_mode = settings_for_static.docs_access_mode
+if docs_mode == "disabled":
+    app = FastAPI(
+        title="carimbo-service",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+else:
+    app = FastAPI(title="carimbo-service")
+
 app.mount(
     artifacts_prefix,
     StaticFiles(directory=str(artifacts_dir)),
     name="artifacts",
 )
 app.include_router(carimbo_router)
+
+
+if docs_mode == "protected":
+    protected_docs_paths = {"/docs", "/docs/", "/redoc", "/redoc/", "/openapi.json"}
+
+    @app.middleware("http")
+    async def docs_api_key_middleware(request: Request, call_next):
+        if request.url.path in protected_docs_paths:
+            enforce_api_key_access(
+                request=request,
+                settings=settings_for_static,
+                apply_rate_limit=False,
+                force_require=True,
+            )
+        return await call_next(request)
 
 
 @app.exception_handler(HTTPException)

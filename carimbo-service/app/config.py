@@ -1,5 +1,7 @@
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,8 +39,24 @@ class Settings(BaseSettings):
     soc_tipo_saida: str = "json"
     soc_timeout_seconds: int = 15
     soc_name_similarity_threshold: float = 0.78
+    environment: str = "dev"
+    docs_access_mode: Literal["public", "protected", "disabled"] = "public"
+    api_key_required: bool = False
+    api_key_header_name: str = "X-API-Key"
+    api_keys: str = ""
+    api_rate_limit_enabled: bool = True
+    api_rate_limit_requests: int = 60
+    api_rate_limit_window_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    @field_validator("api_key_header_name")
+    @classmethod
+    def validate_api_key_header_name(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("api_key_header_name não pode ser vazio")
+        return cleaned
 
 
 @lru_cache
