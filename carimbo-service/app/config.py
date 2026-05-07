@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     api_rate_limit_enabled: bool = True
     api_rate_limit_requests: int = 60
     api_rate_limit_window_seconds: int = 60
+    source_url_timeout_seconds: int = 30
+    source_url_require_https: bool = True
+    source_url_allowed_domains: str = "sharepoint.com"
+    source_url_user_agent: str = "carimbo-service/1.0"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

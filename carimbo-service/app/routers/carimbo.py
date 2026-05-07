@@ -3,8 +3,10 @@ import io
 import logging
 import mimetypes
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import cv2
@@ -14,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from app.config import Settings, get_settings
 from app.security import require_api_key_access
 from app.schemas.carimbo import (
+    AsoGeralExtractUrlRequest,
     AsoGeralExtractRequest,
     AsoGeralExtractResponse,
     AsoEmpresaInfo,
@@ -30,6 +33,7 @@ from app.schemas.carimbo import (
     GeminiModelHealthInfo,
     GeminiTelemetryInfo,
     GeminiExtractRequest,
+    GeminiExtractUrlRequest,
     GeminiExtractResponse,
     MedicoInfo,
     SocRecordInfo,
@@ -49,13 +53,64 @@ from app.services.gemini_pipeline import (
     extract_medico_with_gemini,
     probe_gemini_model,
 )
+from app.services.orientation import (
+    ORIENTATION_MODE_TO_DEGREES,
+    apply_orientation,
+    map_bbox_to_original_orientation,
+)
 from app.services.pdf_renderer import render_page
 from app.services.preprocessor import preprocess_stamp
 from app.services.soc_validator import SocValidationResult, validate_with_soc
+from app.services.url_fetcher import (
+    SourceUrlFetchError,
+    download_file_from_source_url,
+    sanitize_source_url_for_log,
+)
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["carimbo"])
+
+@dataclass(slots=True)
+class _MedicoOrientationRunResult:
+    orientation_mode: str
+    rotation_degrees: int
+    selected_bbox_oriented: Optional[BBoxTuple]
+    selected_crop: Optional[Image.Image]
+    selected_medico: Optional[MedicoExtraction]
+    selected_origin: str
+    selected_score: float
+    selected_reason: str
+    selected_detected: bool
+    selected_fallback_region: bool
+    candidates_evaluated: int
+    strategy: str
+    reason: str
+    message: str
+    gemini_candidates_count: int
+    detection_error_detail: str
+    extraction_errors: int
+
+    @property
+    def success(self) -> bool:
+        return (
+            self.selected_bbox_oriented is not None
+            and self.selected_crop is not None
+            and self.selected_medico is not None
+        )
+
+    @property
+    def selection_score(self) -> float:
+        score = float(self.selected_score)
+        if self.selected_medico and self.selected_medico.valido:
+            score += 0.28
+        if self.selected_detected:
+            score += 0.06
+        if self.selected_fallback_region:
+            score -= 0.08
+        if self.orientation_mode in {"rot_0", "rot_180"}:
+            score += 0.01
+        return score
 
 
 def _to_bbox_model(bbox: Optional[BBoxTuple]) -> Optional[BBox]:
@@ -197,23 +252,24 @@ def _build_image_outputs(
     return img_base64, img_url
 
 
+def _detect_mime_by_signature(raw: bytes) -> Optional[str]:
+    if raw.startswith(b"%PDF-"):
+        return "application/pdf"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith((b"II*\x00", b"MM\x00*")):
+        return "image/tiff"
+    return None
+
+
 def _resolve_upload_mime_type(
     *,
     upload: UploadFile,
     mime_type_override: Optional[str],
     file_bytes: bytes,
 ) -> str:
-    def _detect_mime_by_signature(raw: bytes) -> Optional[str]:
-        if raw.startswith(b"%PDF-"):
-            return "application/pdf"
-        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-            return "image/png"
-        if raw.startswith(b"\xff\xd8\xff"):
-            return "image/jpeg"
-        if raw.startswith((b"II*\x00", b"MM\x00*")):
-            return "image/tiff"
-        return None
-
     candidate = (mime_type_override or upload.content_type or "").strip().lower()
     if candidate in SUPPORTED_MIME_TYPES:
         return candidate
@@ -238,6 +294,78 @@ def _resolve_upload_mime_type(
             f"Use um dos suportados: {allowed}, ou envie um arquivo PDF/PNG/JPEG/TIFF válido."
         ),
     )
+
+
+def _resolve_source_mime_type(
+    *,
+    mime_type_override: Optional[str],
+    response_content_type: str,
+    file_bytes: bytes,
+    source_url: str,
+) -> str:
+    candidate = (mime_type_override or "").strip().lower()
+    if candidate in SUPPORTED_MIME_TYPES:
+        return candidate
+
+    response_mime = (response_content_type or "").strip().lower()
+    if response_mime in SUPPORTED_MIME_TYPES:
+        return response_mime
+
+    parsed = urlsplit(source_url)
+    filename = Path(parsed.path).name.lower()
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed and guessed in SUPPORTED_MIME_TYPES:
+        return guessed
+
+    by_signature = _detect_mime_by_signature(file_bytes[:32])
+    if by_signature and by_signature in SUPPORTED_MIME_TYPES:
+        return by_signature
+
+    allowed = ", ".join(sorted(SUPPORTED_MIME_TYPES))
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            "arquivo_url não retornou um tipo de arquivo suportado. "
+            f"Use um dos suportados: {allowed}."
+        ),
+    )
+
+
+def _fetch_source_file_for_pipeline(
+    *,
+    source_url: str,
+    mime_type_override: Optional[str],
+    settings: Settings,
+) -> tuple[bytes, str]:
+    safe_url = sanitize_source_url_for_log(source_url)
+    try:
+        fetched = download_file_from_source_url(
+            source_url=source_url,
+            timeout_seconds=settings.source_url_timeout_seconds,
+            max_file_size_mb=settings.max_file_size_mb,
+            user_agent=settings.source_url_user_agent,
+            allowed_domains_csv=settings.source_url_allowed_domains,
+            require_https=bool(settings.source_url_require_https),
+        )
+    except SourceUrlFetchError as exc:
+        logger.warning("Falha ao baixar arquivo da URL (%s): %s", safe_url, exc.detail)
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    file_bytes = fetched.file_bytes
+    _enforce_file_size(file_bytes, settings.max_file_size_mb)
+    resolved_mime_type = _resolve_source_mime_type(
+        mime_type_override=mime_type_override,
+        response_content_type=fetched.content_type,
+        file_bytes=file_bytes,
+        source_url=fetched.final_url or source_url,
+    )
+    logger.info(
+        "Arquivo recebido por URL (%s): %s bytes, mime=%s",
+        safe_url,
+        len(file_bytes),
+        resolved_mime_type,
+    )
+    return file_bytes, resolved_mime_type
 
 
 def _draw_debug_overlay(
@@ -502,6 +630,334 @@ def _build_bottom_up_extraction_windows(crop: Image.Image) -> list[tuple[Image.I
     if not windows:
         windows.append((crop, 0.0, "janela_completa"))
     return windows
+
+
+def _run_medico_pipeline_for_orientation(
+    *,
+    image: Image.Image,
+    orientation_mode: str,
+    settings: Settings,
+    timeout: int,
+    max_candidates: int,
+    max_evaluations: int,
+    detection_retry_attempts: int,
+    extraction_retry_attempts: int,
+    retry_backoff_seconds: float,
+    retry_jitter_seconds: float,
+    gemini_usage_events: list[dict[str, object]],
+) -> _MedicoOrientationRunResult:
+    image_width, image_height = image.size
+    selected_bbox: Optional[BBoxTuple] = None
+    selected_crop: Optional[Image.Image] = None
+    selected_medico: Optional[MedicoExtraction] = None
+    selected_origin = "gemini_crop"
+    selected_score = -1.0
+    selected_reason = "gemini_detect_bbox"
+    selected_detected = True
+    selected_fallback_region = False
+
+    candidates_evaluated = 0
+    strategy = "gemini_duplo_estagio"
+    reason = "gemini_detect_bbox"
+    message = "Carimbo detectado e médico extraído via Gemini"
+
+    gemini_candidates = []
+    detection_error_detail = ""
+    extraction_errors = 0
+    bottom_y_start = _clamp_ratio(settings.stamp_bottom_priority_y_start, 0.35, 0.90)
+    bottom_x_end = _clamp_ratio(settings.stamp_bottom_priority_x_end, 0.35, 1.00)
+    focus_x0, focus_y0, focus_x1, focus_y1 = _compute_bottom_focus_bbox(
+        width=image_width,
+        height=image_height,
+        y_start_ratio=bottom_y_start,
+        x_end_ratio=bottom_x_end,
+    )
+
+    if settings.gemini_detection_enabled:
+        focus_image = image.crop((focus_x0, focus_y0, focus_x1, focus_y1))
+        try:
+            focused_candidates = detect_stamp_candidates_with_gemini(
+                image=focus_image,
+                api_key=settings.gemini_api_key,
+                model=settings.gemini_detection_model,
+                timeout_seconds=timeout,
+                max_candidates=max_candidates,
+                retry_attempts=detection_retry_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+                retry_jitter_seconds=retry_jitter_seconds,
+                usage_sink=gemini_usage_events,
+            )
+            for candidate in focused_candidates:
+                local_x, local_y, local_w, local_h = candidate.bbox
+                global_bbox = (
+                    focus_x0 + local_x,
+                    focus_y0 + local_y,
+                    local_w,
+                    local_h,
+                )
+                gemini_candidates.append(
+                    BBoxCandidate(
+                        bbox=global_bbox,
+                        score=min(1.0, candidate.score + 0.04),
+                        reason="gemini_detect_bbox_foco_inferior",
+                    )
+                )
+        except GeminiServiceError as exc:
+            logger.warning(
+                "Falha no estágio Gemini de detecção (foco inferior, %s): %s",
+                orientation_mode,
+                exc,
+            )
+            detection_error_detail = str(exc)
+
+        if not gemini_candidates:
+            try:
+                gemini_candidates = detect_stamp_candidates_with_gemini(
+                    image=image,
+                    api_key=settings.gemini_api_key,
+                    model=settings.gemini_detection_model,
+                    timeout_seconds=timeout,
+                    max_candidates=max_candidates,
+                    retry_attempts=detection_retry_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    retry_jitter_seconds=retry_jitter_seconds,
+                    usage_sink=gemini_usage_events,
+                )
+            except GeminiServiceError as exc:
+                logger.warning(
+                    "Falha no estágio Gemini de detecção (%s): %s",
+                    orientation_mode,
+                    exc,
+                )
+                detection_error_detail = str(exc)
+
+    detection = detect_stamp_region(
+        image=image,
+        min_contour_area=settings.min_contour_area,
+        padding_px=settings.padding_px,
+        fallback_roi_y_start=settings.fallback_roi_y_start,
+        fallback_roi_x_end=settings.fallback_roi_x_end,
+    )
+
+    ranked_proposals: list[tuple[BBoxTuple, float, str, bool, bool, str]] = []
+    for candidate in gemini_candidates:
+        variant_bboxes = build_stamp_crop_variants(
+            bbox=candidate.bbox,
+            width=image_width,
+            height=image_height,
+        )
+        for variant_index, variant_bbox in enumerate(variant_bboxes):
+            proposal_score = max(0.0, candidate.score - (0.03 * variant_index))
+            ranked_proposals.append(
+                (
+                    variant_bbox,
+                    proposal_score,
+                    "gemini_crop",
+                    True,
+                    False,
+                    candidate.reason or "gemini_detect_bbox",
+                )
+            )
+            if len(ranked_proposals) >= max_evaluations:
+                break
+        if len(ranked_proposals) >= max_evaluations:
+            break
+
+    fallback_bottom_left = _build_bottom_left_fallback_proposals(
+        width=image_width,
+        height=image_height,
+        fallback_y_start_ratio=_clamp_ratio(settings.fallback_roi_y_start, 0.40, 0.90),
+        fallback_x_end_ratio=_clamp_ratio(settings.fallback_roi_x_end, 0.35, 0.85),
+        bottom_priority_y_start=bottom_y_start,
+    )
+    for region_index, region_bbox in enumerate(fallback_bottom_left):
+        ranked_proposals.append(
+            (
+                region_bbox,
+                max(0.0, 0.74 - (0.05 * region_index)),
+                "gemini_crop_fallback_opencv",
+                True,
+                True,
+                "fallback_rodape_esquerdo_prioritario",
+            )
+        )
+        if len(ranked_proposals) >= max_evaluations:
+            break
+
+    opencv_bbox = detection.bbox if detection.bbox is not None else detection.fallback_bbox
+    opencv_variants = (
+        build_stamp_crop_variants(opencv_bbox, image_width, image_height)[:2]
+        if detection.found
+        else [opencv_bbox]
+    )
+    for variant_index, variant_bbox in enumerate(opencv_variants):
+        opencv_score = max(0.0, detection.confidence - (0.02 * variant_index))
+        ranked_proposals.append(
+            (
+                variant_bbox,
+                opencv_score,
+                "gemini_crop_fallback_opencv",
+                detection.found,
+                not detection.found,
+                detection.reason or "opencv_fallback",
+            )
+        )
+        if len(ranked_proposals) >= max_evaluations:
+            break
+
+    if not gemini_candidates:
+        strategy = "opencv_fallback_apos_gemini"
+        reason = "gemini_sem_candidatos"
+        message = "Gemini não retornou candidatos válidos. Usando fallback OpenCV."
+
+    for bbox, proposal_score, origin, detected_flag, fallback_flag, proposal_reason in ranked_proposals:
+        crop = image.crop((bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]))
+        processed_crop = preprocess_stamp(crop)
+
+        medico = MedicoExtraction(
+            nome=None,
+            crm_numero=None,
+            crm_uf=None,
+            crm=None,
+            confidence=0.0,
+            valido=False,
+            observacoes="sem_extracao",
+        )
+        local_best_score = -999.0
+        local_errors: list[str] = []
+        for extract_crop, window_bonus, window_label in _build_bottom_up_extraction_windows(processed_crop):
+            try:
+                extracted = extract_medico_with_gemini(
+                    crop_image=extract_crop,
+                    api_key=settings.gemini_api_key,
+                    model=settings.gemini_extraction_model,
+                    timeout_seconds=timeout,
+                    retry_attempts=extraction_retry_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    retry_jitter_seconds=retry_jitter_seconds,
+                    usage_sink=gemini_usage_events,
+                )
+            except GeminiServiceError as exc:
+                extraction_errors += 1
+                local_errors.append(f"{window_label}:{str(exc)[:120]}")
+                continue
+
+            obs_upper = extracted.observacoes.upper() if extracted.observacoes else ""
+            header_penalty = (
+                -0.40
+                if ("CABECALHO" in obs_upper or "CABEÇALHO" in obs_upper or "PCMSO" in obs_upper)
+                else 0.0
+            )
+            extracted_score = (
+                float(extracted.confidence)
+                + (0.25 if extracted.valido else -0.10)
+                + float(window_bonus)
+                + header_penalty
+            )
+            if extracted_score > local_best_score:
+                local_best_score = extracted_score
+                obs = extracted.observacoes or ""
+                extracted.observacoes = f"{obs} | origem_janela={window_label}".strip(" |")
+                medico = extracted
+
+            if (
+                extracted.valido
+                and window_label != "janela_completa"
+                and (extracted_score >= 0.92 or float(extracted.confidence) >= 0.72)
+            ):
+                break
+
+        if local_best_score < -500.0 and local_errors:
+            logger.warning("Falha no estágio Gemini de extração para um candidato (%s).", orientation_mode)
+            medico = MedicoExtraction(
+                nome=None,
+                crm_numero=None,
+                crm_uf=None,
+                crm=None,
+                confidence=0.0,
+                valido=False,
+                observacoes=f"falha_extracao_gemini: {'; '.join(local_errors[:2])}",
+            )
+
+        candidates_evaluated += 1
+        geometry_adjustment = bbox_geometry_adjustment(
+            bbox=bbox,
+            width=image_width,
+            height=image_height,
+        )
+        bottom_adjustment = _bottom_priority_adjustment(
+            bbox=bbox,
+            image_height=image_height,
+            bottom_y_start_ratio=bottom_y_start,
+        )
+        shape_adjustment = _signature_shape_adjustment(
+            bbox=bbox,
+            width=image_width,
+            height=image_height,
+        )
+        combined_score = combined_candidate_score(
+            proposal_score,
+            medico,
+            geometry_adjustment=geometry_adjustment + bottom_adjustment + shape_adjustment,
+        )
+
+        if combined_score > selected_score:
+            selected_score = combined_score
+            selected_bbox = bbox
+            selected_crop = processed_crop
+            selected_medico = medico
+            selected_origin = origin
+            selected_detected = detected_flag
+            selected_fallback_region = fallback_flag
+            selected_reason = proposal_reason
+
+        y_ratio = float(bbox[1] / max(1, image_height))
+        if medico.valido and combined_score >= 0.92 and y_ratio >= max(0.58, bottom_y_start - 0.04):
+            break
+
+    if selected_origin == "gemini_crop_fallback_opencv":
+        strategy = (
+            "opencv_fallback_apos_gemini"
+            if not gemini_candidates
+            else "gemini_duplo_estagio_com_fallback_opencv"
+        )
+        reason = selected_reason
+        if not gemini_candidates:
+            message = "Gemini não retornou candidatos válidos. Usando fallback OpenCV."
+        else:
+            message = "Seleção final obtida via fallback OpenCV + extração Gemini."
+    else:
+        reason = selected_reason
+        if detection_error_detail:
+            message = (
+                "Detecção Gemini oscilou, mas a extração foi concluída com os candidatos disponíveis."
+            )
+
+    if selected_medico is not None and not selected_medico.valido:
+        message = (
+            "Carimbo localizado, mas os dados do médico não passaram na validação "
+            "de nome/CRM."
+        )
+
+    return _MedicoOrientationRunResult(
+        orientation_mode=orientation_mode,
+        rotation_degrees=int(ORIENTATION_MODE_TO_DEGREES.get(orientation_mode, 0)),
+        selected_bbox_oriented=selected_bbox,
+        selected_crop=selected_crop,
+        selected_medico=selected_medico,
+        selected_origin=selected_origin,
+        selected_score=selected_score,
+        selected_reason=reason,
+        selected_detected=selected_detected,
+        selected_fallback_region=selected_fallback_region,
+        candidates_evaluated=candidates_evaluated,
+        strategy=strategy,
+        reason=reason,
+        message=message,
+        gemini_candidates_count=len(gemini_candidates),
+        detection_error_detail=detection_error_detail,
+        extraction_errors=extraction_errors,
+    )
 
 
 @router.post(
@@ -892,6 +1348,47 @@ async def extract_aso_geral_upload(
 
 
 @router.post(
+    "/extrair-aso-geral/url",
+    response_model=AsoGeralExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def extract_aso_geral_url(
+    payload: AsoGeralExtractUrlRequest,
+    settings: Settings = Depends(get_settings),
+) -> AsoGeralExtractResponse:
+    file_bytes, resolved_mime_type = _fetch_source_file_for_pipeline(
+        source_url=payload.arquivo_url,
+        mime_type_override=payload.mime_type,
+        settings=settings,
+    )
+    internal_payload = AsoGeralExtractRequest(
+        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+        mime_type=resolved_mime_type,
+        pagina=max(0, int(payload.pagina)),
+        retornar_imagem_base64=bool(payload.retornar_imagem_base64),
+        retornar_imagem_url=bool(payload.retornar_imagem_url),
+        origem=payload.origem,
+        drive_item_id=payload.drive_item_id,
+        folder_drive_id=payload.folder_drive_id,
+        folder_name=payload.folder_name,
+        user_code=payload.user_code,
+        folder_path=payload.folder_path,
+        folder_url=payload.folder_url,
+        file_name=payload.file_name,
+        file_web_url=payload.file_web_url,
+        meta_queued_at=payload.meta_queued_at,
+    )
+    return extract_aso_geral_pipeline(payload=internal_payload, settings=settings)
+
+
+@router.post(
     "/extrair-medico-gemini",
     response_model=GeminiExtractResponse,
     dependencies=[Depends(require_api_key_access)],
@@ -935,323 +1432,141 @@ def extract_medico_with_gemini_pipeline(
     max_candidates = max(1, min(payload.max_candidatos, settings.gemini_max_candidates, 5))
     max_evaluations_cap = max(3, min(12, int(settings.gemini_max_evaluations)))
     max_evaluations = max(3, min(max_evaluations_cap, (max_candidates * 2) + 1))
-    image_width, image_height = image.size
+    original_size = image.size
+    orientation_results: list[_MedicoOrientationRunResult] = []
+    best_run: Optional[_MedicoOrientationRunResult] = None
+    orientation_strategy = "orientacao_0_180_prioritaria"
 
-    selected_bbox: Optional[BBoxTuple] = None
-    selected_crop: Optional[Image.Image] = None
-    selected_medico: Optional[MedicoExtraction] = None
-    selected_origin = "gemini_crop"
-    selected_score = -1.0
-    selected_reason = "gemini_detect_bbox"
-    selected_detected = True
-    selected_fallback_region = False
-
-    candidates_evaluated = 0
-    strategy = "gemini_duplo_estagio"
-    reason = "gemini_detect_bbox"
-    message = "Carimbo detectado e médico extraído via Gemini"
-
-    gemini_candidates = []
-    detection_error_detail = ""
-    extraction_errors = 0
-    bottom_y_start = _clamp_ratio(settings.stamp_bottom_priority_y_start, 0.35, 0.90)
-    bottom_x_end = _clamp_ratio(settings.stamp_bottom_priority_x_end, 0.35, 1.00)
-    focus_x0, focus_y0, focus_x1, focus_y1 = _compute_bottom_focus_bbox(
-        width=image_width,
-        height=image_height,
-        y_start_ratio=bottom_y_start,
-        x_end_ratio=bottom_x_end,
-    )
-
-    if settings.gemini_detection_enabled:
-        # 1) Prioriza detecção Gemini na faixa inferior (onde o carimbo costuma estar).
-        focus_image = image.crop((focus_x0, focus_y0, focus_x1, focus_y1))
+    for orientation_mode in ("rot_0", "rot_180"):
+        if (
+            best_run is not None
+            and best_run.success
+            and best_run.selected_medico is not None
+            and best_run.selected_medico.valido
+            and best_run.selected_score >= 0.93
+            and not best_run.selected_fallback_region
+        ):
+            break
+        oriented_image = apply_orientation(image, orientation_mode)
         try:
-            focused_candidates = detect_stamp_candidates_with_gemini(
-                image=focus_image,
-                api_key=settings.gemini_api_key,
-                model=settings.gemini_detection_model,
-                timeout_seconds=timeout,
+            run_result = _run_medico_pipeline_for_orientation(
+                image=oriented_image,
+                orientation_mode=orientation_mode,
+                settings=settings,
+                timeout=timeout,
                 max_candidates=max_candidates,
-                retry_attempts=detection_retry_attempts,
+                max_evaluations=max_evaluations,
+                detection_retry_attempts=detection_retry_attempts,
+                extraction_retry_attempts=extraction_retry_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
                 retry_jitter_seconds=retry_jitter_seconds,
-                usage_sink=gemini_usage_events,
+                gemini_usage_events=gemini_usage_events,
             )
-            for candidate in focused_candidates:
-                local_x, local_y, local_w, local_h = candidate.bbox
-                global_bbox = (
-                    focus_x0 + local_x,
-                    focus_y0 + local_y,
-                    local_w,
-                    local_h,
-                )
-                gemini_candidates.append(
-                    BBoxCandidate(
-                        bbox=global_bbox,
-                        score=min(1.0, candidate.score + 0.04),
-                        reason="gemini_detect_bbox_foco_inferior",
-                    )
-                )
-        except GeminiServiceError as exc:
-            logger.warning("Falha no estágio Gemini de detecção (foco inferior): %s", exc)
-            detection_error_detail = str(exc)
-
-        # 2) Se o foco inferior não devolver candidatos, tenta página inteira.
-        if not gemini_candidates:
-            try:
-                gemini_candidates = detect_stamp_candidates_with_gemini(
-                    image=image,
-                    api_key=settings.gemini_api_key,
-                    model=settings.gemini_detection_model,
-                    timeout_seconds=timeout,
-                    max_candidates=max_candidates,
-                    retry_attempts=detection_retry_attempts,
-                    retry_backoff_seconds=retry_backoff_seconds,
-                    retry_jitter_seconds=retry_jitter_seconds,
-                    usage_sink=gemini_usage_events,
-                )
-            except GeminiServiceError as exc:
-                logger.warning("Falha no estágio Gemini de detecção: %s", exc)
-                detection_error_detail = str(exc)
-
-    try:
-        detection = detect_stamp_region(
-            image=image,
-            min_contour_area=settings.min_contour_area,
-            padding_px=settings.padding_px,
-            fallback_roi_y_start=settings.fallback_roi_y_start,
-            fallback_roi_x_end=settings.fallback_roi_x_end,
-        )
-    except cv2.error as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro no processamento da imagem: {exc}",
-        ) from exc
-
-    ranked_proposals: list[tuple[BBoxTuple, float, str, bool, bool, str]] = []
-    for candidate in gemini_candidates:
-        variant_bboxes = build_stamp_crop_variants(
-            bbox=candidate.bbox,
-            width=image_width,
-            height=image_height,
-        )
-        for variant_index, variant_bbox in enumerate(variant_bboxes):
-            proposal_score = max(0.0, candidate.score - (0.03 * variant_index))
-            ranked_proposals.append(
-                (
-                    variant_bbox,
-                    proposal_score,
-                    "gemini_crop",
-                    True,
-                    False,
-                    candidate.reason or "gemini_detect_bbox",
-                )
-            )
-            if len(ranked_proposals) >= max_evaluations:
-                break
-        if len(ranked_proposals) >= max_evaluations:
-            break
-
-    # Mesmo sem bbox do Gemini/OpenCV, força avaliação de ROIs no rodapé esquerdo.
-    fallback_bottom_left = _build_bottom_left_fallback_proposals(
-        width=image_width,
-        height=image_height,
-        fallback_y_start_ratio=_clamp_ratio(settings.fallback_roi_y_start, 0.40, 0.90),
-        fallback_x_end_ratio=_clamp_ratio(settings.fallback_roi_x_end, 0.35, 0.85),
-        bottom_priority_y_start=bottom_y_start,
-    )
-    for region_index, region_bbox in enumerate(fallback_bottom_left):
-        ranked_proposals.append(
-            (
-                region_bbox,
-                max(0.0, 0.74 - (0.05 * region_index)),
-                "gemini_crop_fallback_opencv",
-                True,
-                True,
-                "fallback_rodape_esquerdo_prioritario",
-            )
-        )
-        if len(ranked_proposals) >= max_evaluations:
-            break
-
-    opencv_bbox = detection.bbox if detection.bbox is not None else detection.fallback_bbox
-    opencv_variants = (
-        build_stamp_crop_variants(opencv_bbox, image_width, image_height)[:2]
-        if detection.found
-        else [opencv_bbox]
-    )
-    for variant_index, variant_bbox in enumerate(opencv_variants):
-        opencv_score = max(0.0, detection.confidence - (0.02 * variant_index))
-        ranked_proposals.append(
-            (
-                variant_bbox,
-                opencv_score,
-                "gemini_crop_fallback_opencv",
-                detection.found,
-                not detection.found,
-                detection.reason or "opencv_fallback",
-            )
-        )
-        if len(ranked_proposals) >= max_evaluations:
-            break
-
-    if not gemini_candidates:
-        strategy = "opencv_fallback_apos_gemini"
-        reason = "gemini_sem_candidatos"
-        message = "Gemini não retornou candidatos válidos. Usando fallback OpenCV."
-
-    for bbox, proposal_score, origin, detected_flag, fallback_flag, proposal_reason in ranked_proposals:
-        try:
-            x, y, w, h = bbox
-            crop = image.crop((x, y, x + w, y + h))
-            processed_crop = preprocess_stamp(crop)
         except cv2.error as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Erro no processamento da imagem: {exc}",
             ) from exc
+        orientation_results.append(run_result)
+        if run_result.success and (best_run is None or run_result.selection_score > best_run.selection_score):
+            best_run = run_result
 
-        medico = MedicoExtraction(
-            nome=None,
-            crm_numero=None,
-            crm_uf=None,
-            crm=None,
-            confidence=0.0,
-            valido=False,
-            observacoes="sem_extracao",
+    needs_sideways_fallback = (
+        best_run is None
+        or not best_run.success
+        or best_run.selected_medico is None
+        or (
+            (not best_run.selected_medico.valido and best_run.selected_score < 0.86)
+            or best_run.selected_score < 0.72
         )
-        local_best_score = -999.0
-        local_errors: list[str] = []
-        for extract_crop, window_bonus, window_label in _build_bottom_up_extraction_windows(processed_crop):
+    )
+    if needs_sideways_fallback:
+        orientation_strategy = "orientacao_0_180_com_fallback_90_270"
+        for orientation_mode in ("rot_90", "rot_270"):
+            oriented_image = apply_orientation(image, orientation_mode)
             try:
-                extracted = extract_medico_with_gemini(
-                    crop_image=extract_crop,
-                    api_key=settings.gemini_api_key,
-                    model=settings.gemini_extraction_model,
-                    timeout_seconds=timeout,
-                    retry_attempts=extraction_retry_attempts,
+                run_result = _run_medico_pipeline_for_orientation(
+                    image=oriented_image,
+                    orientation_mode=orientation_mode,
+                    settings=settings,
+                    timeout=timeout,
+                    max_candidates=max_candidates,
+                    max_evaluations=max_evaluations,
+                    detection_retry_attempts=detection_retry_attempts,
+                    extraction_retry_attempts=extraction_retry_attempts,
                     retry_backoff_seconds=retry_backoff_seconds,
                     retry_jitter_seconds=retry_jitter_seconds,
-                    usage_sink=gemini_usage_events,
+                    gemini_usage_events=gemini_usage_events,
                 )
-            except GeminiServiceError as exc:
-                extraction_errors += 1
-                local_errors.append(f"{window_label}:{str(exc)[:120]}")
-                continue
-
-            obs_upper = extracted.observacoes.upper() if extracted.observacoes else ""
-            header_penalty = (
-                -0.40
-                if ("CABECALHO" in obs_upper or "CABEÇALHO" in obs_upper or "PCMSO" in obs_upper)
-                else 0.0
-            )
-            extracted_score = (
-                float(extracted.confidence)
-                + (0.25 if extracted.valido else -0.10)
-                + float(window_bonus)
-                + header_penalty
-            )
-            if extracted_score > local_best_score:
-                local_best_score = extracted_score
-                obs = extracted.observacoes or ""
-                extracted.observacoes = f"{obs} | origem_janela={window_label}".strip(" |")
-                medico = extracted
-
+            except cv2.error as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Erro no processamento da imagem: {exc}",
+                ) from exc
+            orientation_results.append(run_result)
+            if run_result.success and (
+                best_run is None or run_result.selection_score > best_run.selection_score
+            ):
+                best_run = run_result
             if (
-                extracted.valido
-                and window_label != "janela_completa"
-                and (extracted_score >= 0.92 or float(extracted.confidence) >= 0.72)
+                run_result.success
+                and run_result.selected_medico is not None
+                and run_result.selected_medico.valido
+                and run_result.selected_score >= 0.93
+                and not run_result.selected_fallback_region
             ):
                 break
 
-        if local_best_score < -500.0 and local_errors:
-            logger.warning("Falha no estágio Gemini de extração para um candidato: %s", local_errors[0])
-            medico = MedicoExtraction(
-                nome=None,
-                crm_numero=None,
-                crm_uf=None,
-                crm=None,
-                confidence=0.0,
-                valido=False,
-                observacoes=f"falha_extracao_gemini: {'; '.join(local_errors[:2])}",
-            )
-
-        candidates_evaluated += 1
-        geometry_adjustment = bbox_geometry_adjustment(
-            bbox=bbox,
-            width=image_width,
-            height=image_height,
-        )
-        bottom_adjustment = _bottom_priority_adjustment(
-            bbox=bbox,
-            image_height=image_height,
-            bottom_y_start_ratio=bottom_y_start,
-        )
-        shape_adjustment = _signature_shape_adjustment(
-            bbox=bbox,
-            width=image_width,
-            height=image_height,
-        )
-        combined_score = combined_candidate_score(
-            proposal_score,
-            medico,
-            geometry_adjustment=geometry_adjustment + bottom_adjustment + shape_adjustment,
-        )
-
-        if combined_score > selected_score:
-            selected_score = combined_score
-            selected_bbox = bbox
-            selected_crop = processed_crop
-            selected_medico = medico
-            selected_origin = origin
-            selected_detected = detected_flag
-            selected_fallback_region = fallback_flag
-            selected_reason = proposal_reason
-
-        y_ratio = float(bbox[1] / max(1, image_height))
-        if medico.valido and combined_score >= 0.92 and y_ratio >= max(0.58, bottom_y_start - 0.04):
-            break
-
-    if selected_bbox is None or selected_crop is None or selected_medico is None:
-        if extraction_errors > 0:
+    if best_run is None or not best_run.success or best_run.selected_medico is None:
+        extraction_total_errors = sum(item.extraction_errors for item in orientation_results)
+        detection_details = [
+            f"{item.orientation_mode}:{item.detection_error_detail}"
+            for item in orientation_results
+            if item.detection_error_detail
+        ]
+        if extraction_total_errors > 0:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
                     "Erro no Gemini (extração): falha em todas as tentativas "
-                    f"({extraction_errors})."
+                    f"({extraction_total_errors})."
                 ),
             )
-        detail = "Nenhum candidato válido foi processado."
-        if detection_error_detail:
-            detail = f"{detail} Detalhe da detecção Gemini: {detection_error_detail}"
+        detail = "Nenhum candidato válido foi processado em nenhuma orientação."
+        if detection_details:
+            detail = f"{detail} Detalhes detecção Gemini: {' | '.join(detection_details[:3])}"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=detail,
         )
 
-    if selected_origin == "gemini_crop_fallback_opencv":
-        strategy = (
-            "opencv_fallback_apos_gemini"
-            if not gemini_candidates
-            else "gemini_duplo_estagio_com_fallback_opencv"
-        )
-        reason = selected_reason
-        if not gemini_candidates:
-            message = "Gemini não retornou candidatos válidos. Usando fallback OpenCV."
-        else:
-            message = "Seleção final obtida via fallback OpenCV + extração Gemini."
-    else:
-        reason = selected_reason
-        if detection_error_detail:
-            message = (
-                "Detecção Gemini oscilou, mas a extração foi concluída com os candidatos disponíveis."
-            )
+    selected_bbox_oriented = best_run.selected_bbox_oriented
+    selected_crop = best_run.selected_crop
+    selected_medico = best_run.selected_medico
+    selected_origin = best_run.selected_origin
+    selected_score = best_run.selected_score
+    selected_detected = best_run.selected_detected
+    selected_fallback_region = best_run.selected_fallback_region
+    strategy = best_run.strategy
+    reason = best_run.reason
+    message = best_run.message
+    candidates_evaluated = sum(item.candidates_evaluated for item in orientation_results)
+    applied_orientation_mode = best_run.orientation_mode
+    applied_rotation_degrees = int(best_run.rotation_degrees)
+    selected_bbox = map_bbox_to_original_orientation(
+        bbox=selected_bbox_oriented,
+        orientation_mode=applied_orientation_mode,
+        oriented_size=apply_orientation(image, applied_orientation_mode).size,
+        original_size=original_size,
+    )
 
-    if not selected_medico.valido:
-        message = (
-            "Carimbo localizado, mas os dados do médico não passaram na validação "
-            "de nome/CRM."
+    if applied_rotation_degrees != 0:
+        strategy = f"{strategy}_com_normalizacao_orientacao"
+        reason = f"{reason}_rotacionado_{applied_rotation_degrees}"
+        message = f"{message} | orientação corrigida: {applied_rotation_degrees}°"
+        obs = selected_medico.observacoes or ""
+        selected_medico.observacoes = (
+            f"{obs} | orientacao_aplicada={applied_rotation_degrees}°".strip(" |")
         )
 
     soc_threshold = max(0.0, min(1.0, float(settings.soc_name_similarity_threshold)))
@@ -1343,6 +1658,8 @@ def extract_medico_with_gemini_pipeline(
         motivo=reason,
         mensagem=message,
         estrategia=strategy,
+        estrategia_orientacao=orientation_strategy,
+        rotacao_aplicada_graus=applied_rotation_degrees,
         candidatos_avaliados=candidates_evaluated,
         medico=_medico_info_model(
             extraction=selected_medico,
@@ -1391,3 +1708,35 @@ async def extract_medico_with_gemini_upload(
         retornar_imagem_url=bool(retornar_imagem_url),
     )
     return extract_medico_with_gemini_pipeline(payload=payload, settings=settings)
+
+
+@router.post(
+    "/extrair-medico-gemini/url",
+    response_model=GeminiExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def extract_medico_with_gemini_url(
+    payload: GeminiExtractUrlRequest,
+    settings: Settings = Depends(get_settings),
+) -> GeminiExtractResponse:
+    file_bytes, resolved_mime_type = _fetch_source_file_for_pipeline(
+        source_url=payload.arquivo_url,
+        mime_type_override=payload.mime_type,
+        settings=settings,
+    )
+    internal_payload = GeminiExtractRequest(
+        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+        mime_type=resolved_mime_type,
+        pagina=max(0, int(payload.pagina)),
+        max_candidatos=max(1, min(int(payload.max_candidatos), 5)),
+        retornar_imagem_base64=bool(payload.retornar_imagem_base64),
+        retornar_imagem_url=bool(payload.retornar_imagem_url),
+    )
+    return extract_medico_with_gemini_pipeline(payload=internal_payload, settings=settings)

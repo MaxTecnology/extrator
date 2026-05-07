@@ -163,6 +163,10 @@ Notas operacionais:
 - `API_RATE_LIMIT_ENABLED`: ativa limite de requisições por chave.
 - `API_RATE_LIMIT_REQUESTS`: quantidade máxima de requisições na janela.
 - `API_RATE_LIMIT_WINDOW_SECONDS`: janela do rate limit em segundos.
+- `SOURCE_URL_TIMEOUT_SECONDS`: timeout (s) para baixar arquivo via `arquivo_url`.
+- `SOURCE_URL_REQUIRE_HTTPS`: exige `https://` nas rotas por URL.
+- `SOURCE_URL_ALLOWED_DOMAINS`: domínios permitidos para `arquivo_url` (CSV, ex.: `sharepoint.com`).
+- `SOURCE_URL_USER_AGENT`: User-Agent usado no download por URL.
 
 ## Segurança de Acesso
 
@@ -201,6 +205,17 @@ O backend valida os dados (nome e CRM/UF) e retorna o melhor candidato.
 
 Quando o Gemini não devolve bbox válida, o endpoint usa fallback OpenCV para recorte e mantém a extração via Gemini.
 
+Normalização de orientação (automática):
+
+- tenta primeiro `0°` e `180°` (prioritário);
+- quando o resultado ainda é fraco, tenta `90°` e `270°`;
+- escolhe o melhor candidato consolidado para reduzir erros em documentos invertidos.
+
+Campos adicionais no retorno:
+
+- `estrategia_orientacao`: estratégia usada no documento (`orientacao_0_180_prioritaria` ou fallback com `90_270`).
+- `rotacao_aplicada_graus`: rotação efetivamente aplicada na extração (`0`, `90`, `180`, `270`).
+
 Para facilitar visualização sem base64, os endpoints aceitam:
 
 - `retornar_imagem_base64` (default `false`)
@@ -214,8 +229,16 @@ Para integração com n8n (binary), use também:
 - `POST /debug/visualizar/upload` com `multipart/form-data` e campo `file`.
 - `POST /extrair-medico-gemini/upload` com `multipart/form-data` e campo `file`.
 - `POST /extrair-aso-geral/upload` com `multipart/form-data` e campo `file`.
+- `POST /extrair-medico-gemini/url` com JSON contendo `arquivo_url`.
+- `POST /extrair-aso-geral/url` com JSON contendo `arquivo_url`.
 - Campos opcionais via form-data: `pagina`, `max_candidatos`, `mime_type`,
   `retornar_imagem_base64`, `retornar_imagem_url`.
+
+Rotas por URL (sem enviar binário no n8n):
+
+- `arquivo_url` deve apontar para PDF/PNG/JPEG/TIFF válido.
+- O backend baixa o arquivo no ato da chamada, aplica as mesmas validações e segue o mesmo pipeline.
+- Recomendado para links temporários SharePoint gerados no passo anterior do fluxo.
 
 Se `SOC_ENABLED=true`, o endpoint também consulta o SOC por CRM e compara similaridade de nome para detectar casos de CRM truncado/incorreto (ex: `26807` vs `268072`). Quando há divergência, o serviço faz uma segunda tentativa por variação de sufixo (`0-9`) para sugerir correção. O retorno inclui:
 

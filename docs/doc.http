@@ -6,6 +6,7 @@
 
 @baseUrl = http://localhost:8001
 @apiKey = {{apiKey}}
+@arquivoUrl = 
 
 ########
 GET {{baseUrl}}/docs
@@ -215,6 +216,22 @@ Content-Type: application/octet-stream
 --WebAppBoundaryOctetImg--
 
 ###
+# 4.4) Pipeline Gemini por URL (sem enviar binário)
+# Ideal para n8n quando você já tem um link temporário do SharePoint.
+POST {{baseUrl}}/extrair-medico-gemini/url
+Content-Type: application/json
+Accept: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "arquivo_url": "{{arquivoUrl}}",
+  "pagina": 0,
+  "max_candidatos": 3,
+  "retornar_imagem_base64": false,
+  "retornar_imagem_url": false
+}
+
+###
 # 5) Extração de dados gerais do ASO (sem médico/carimbo)
 POST {{baseUrl}}/extrair-aso-geral
 Content-Type: application/json
@@ -296,6 +313,28 @@ Content-Type: application/pdf
 
 < ./arquivo1.pdf
 --AsoGeralBoundary--
+
+###
+# 5.2) Extração ASO geral por URL (sem enviar binário)
+POST {{baseUrl}}/extrair-aso-geral/url
+Content-Type: application/json
+Accept: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "arquivo_url": "{{arquivoUrl}}",
+  "pagina": 0,
+  "origem": "PORTO",
+  "drive_item_id": "01FRJ5KQ5TKROCIZQQZVA3BTRDKJ652Y7E",
+  "folder_drive_id": "01FRJ5KQ75TZGAON5VBVFKH4VOU4TIVX5H",
+  "folder_name": "11111111",
+  "user_code": "11111111",
+  "folder_path": "11111111",
+  "folder_url": "https://example.com/folder",
+  "file_name": "output_1776343471517_72750696-176.pdf",
+  "file_web_url": "https://example.com/file.pdf",
+  "meta_queued_at": "2026-04-30T13:56:09.984Z"
+}
 
 ###
 # 6) Teste de validação (erro esperado 422)

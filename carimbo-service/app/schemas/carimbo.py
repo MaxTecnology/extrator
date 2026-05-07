@@ -1,5 +1,6 @@
 import base64
 import binascii
+from urllib.parse import urlsplit
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -47,6 +48,54 @@ class GeminiExtractRequest(ExtractRequest):
 
 
 class AsoGeralExtractRequest(ExtractRequest):
+    origem: Optional[str] = None
+    drive_item_id: Optional[str] = None
+    folder_drive_id: Optional[str] = None
+    folder_name: Optional[str] = None
+    user_code: Optional[str] = None
+    folder_path: Optional[str] = None
+    folder_url: Optional[str] = None
+    file_name: Optional[str] = None
+    file_web_url: Optional[str] = None
+    meta_queued_at: Optional[str] = None
+
+
+class UrlExtractRequest(BaseModel):
+    arquivo_url: str
+    mime_type: Optional[str] = None
+    pagina: int = Field(default=0, ge=0)
+    retornar_imagem_base64: bool = False
+    retornar_imagem_url: bool = False
+
+    @field_validator("arquivo_url")
+    @classmethod
+    def validate_arquivo_url(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        parsed = urlsplit(cleaned)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("arquivo_url deve ser uma URL HTTP/HTTPS válida")
+        return cleaned
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_optional_mime_type(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized not in SUPPORTED_MIME_TYPES:
+            raise ValueError(
+                "mime_type deve ser application/pdf, image/png, image/jpeg ou image/tiff"
+            )
+        return normalized
+
+
+class GeminiExtractUrlRequest(UrlExtractRequest):
+    max_candidatos: int = Field(default=3, ge=1, le=5)
+
+
+class AsoGeralExtractUrlRequest(UrlExtractRequest):
     origem: Optional[str] = None
     drive_item_id: Optional[str] = None
     folder_drive_id: Optional[str] = None
@@ -176,6 +225,8 @@ class GeminiExtractResponse(BaseModel):
     motivo: str
     mensagem: str
     estrategia: str
+    estrategia_orientacao: str = "orientacao_0_180_prioritaria"
+    rotacao_aplicada_graus: int = 0
     candidatos_avaliados: int
     medico: MedicoInfo
     revisao_humana_recomendada: bool = False
