@@ -66,6 +66,8 @@ CRM_UF_NUM = re.compile(r"(?P<uf>[A-Za-z]{2})\s*[/-]?\s*(?P<num>\d{4,8})")
 CRM_NUMBER_WITH_SEPARATORS = re.compile(r"\d(?:[\d\.\- ]{2,14})\d")
 DATE_DMY_2Y = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{2})\s*$")
 DATE_DMY_4Y = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
+CPF_FORMATTED_PATTERN = re.compile(r"(?<!\d)\d{3}\.\d{3}\.\d{3}-\d{2}(?!\d)")
+CPF_DIGITS_11_PATTERN = re.compile(r"(?<!\d)\d{11}(?!\d)")
 HEADER_OBS_HINTS = (
     "CABECALHO",
     "PCMSO",
@@ -435,13 +437,81 @@ def _normalize_aso_date_field(value: Any) -> str:
     return f"{int(dd):02d}/{int(mm):02d}/20{yy}"
 
 
+def _format_cpf_digits(digits: str) -> str:
+    return f"{digits[0:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:11]}"
+
+
+def _is_valid_cpf_digits(digits: str) -> bool:
+    raw = re.sub(r"\D", "", digits or "")
+    if len(raw) != 11:
+        return False
+    if raw == raw[0] * 11:
+        return False
+
+    numbers = [int(char) for char in raw]
+
+    sum_first = sum(numbers[idx] * (10 - idx) for idx in range(9))
+    remainder_first = sum_first % 11
+    digit_first = 0 if remainder_first < 2 else (11 - remainder_first)
+    if numbers[9] != digit_first:
+        return False
+
+    sum_second = sum(numbers[idx] * (11 - idx) for idx in range(10))
+    remainder_second = sum_second % 11
+    digit_second = 0 if remainder_second < 2 else (11 - remainder_second)
+    return numbers[10] == digit_second
+
+
+def _extract_cpf_candidates(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+
+    candidates: list[str] = []
+
+    def add_candidate(raw_candidate: str) -> None:
+        digits = re.sub(r"\D", "", raw_candidate or "")
+        if len(digits) != 11:
+            return
+        if digits not in candidates:
+            candidates.append(digits)
+
+    segments: list[str] = []
+    if "/" in text:
+        parts = text.split("/")
+        segments.extend(parts[1:])
+    segments.append(text)
+
+    for segment in segments:
+        for match in CPF_FORMATTED_PATTERN.finditer(segment):
+            add_candidate(match.group(0))
+
+        for match in CPF_DIGITS_11_PATTERN.finditer(segment):
+            add_candidate(match.group(0))
+
+        digits_only = re.sub(r"\D", "", segment)
+        if 11 < len(digits_only) <= 22:
+            for index in range(len(digits_only) - 11, -1, -1):
+                add_candidate(digits_only[index : index + 11])
+
+    return candidates
+
+
 def _normalize_aso_cpf(value: Any) -> str:
     text = _normalize_aso_text_field(value, default_value="Ausente")
     if text in {"**", "Ausente"}:
         return text
+
+    candidates = _extract_cpf_candidates(text)
+    if candidates:
+        for digits in candidates:
+            if _is_valid_cpf_digits(digits):
+                return _format_cpf_digits(digits)
+        return _format_cpf_digits(candidates[0])
+
     digits = re.sub(r"\D", "", text)
     if len(digits) == 11:
-        return f"{digits[0:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:11]}"
+        return _format_cpf_digits(digits)
     return text
 
 

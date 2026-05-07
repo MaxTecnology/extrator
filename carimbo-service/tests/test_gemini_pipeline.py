@@ -141,6 +141,14 @@ def test_normalize_aso_cpf_formats_digits() -> None:
     assert _normalize_aso_cpf("378.606.518-74") == "378.606.518-74"
 
 
+def test_normalize_aso_cpf_extracts_from_leading_slash_value() -> None:
+    assert _normalize_aso_cpf("/064.724.182-09") == "064.724.182-09"
+
+
+def test_normalize_aso_cpf_extracts_from_rg_cpf_same_field() -> None:
+    assert _normalize_aso_cpf("58985689-3/536.682.208-40") == "536.682.208-40"
+
+
 def test_normalize_aso_parecer_limits_vocab() -> None:
     assert _normalize_aso_parecer("Apto") == "Apto"
     assert _normalize_aso_parecer("Marcado") == "**"

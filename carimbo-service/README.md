@@ -261,6 +261,7 @@ Decisões de implementação:
 2. O contrato dos blocos principais segue o mesmo formato usado hoje no node n8n para reduzir impacto no fluxo.
 3. Metadados opcionais (`origem`, `drive_item_id`, `folder_*`, `file_*`, `meta_queued_at`) são aceitos e retornados no payload final.
 4. O retorno inclui `gemini_telemetria`, `revisao_humana_recomendada` e `motivos_revisao` para auditoria operacional.
+5. CPF passa por pós-normalização determinística (regex + dígito verificador), cobrindo casos como `RG/CPF` no mesmo campo e valores iniciando com `/`.
 
 Exemplo de retorno (shape principal):
 

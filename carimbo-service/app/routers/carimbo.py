@@ -45,6 +45,7 @@ from app.services.gemini_pipeline import (
     BBoxCandidate,
     GeminiServiceError,
     MedicoExtraction,
+    _is_valid_cpf_digits,
     bbox_geometry_adjustment,
     build_stamp_crop_variants,
     combined_candidate_score,
@@ -503,6 +504,8 @@ def _build_aso_review_flags(aso_payload: dict[str, dict[str, str]]) -> tuple[boo
         digits = "".join(char for char in cpf if char.isdigit())
         if len(digits) != 11:
             reasons.append("cpf_formato_duvidoso")
+        elif not _is_valid_cpf_digits(digits):
+            reasons.append("cpf_digito_verificador_invalido")
 
     return bool(reasons), reasons
 
