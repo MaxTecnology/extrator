@@ -167,6 +167,9 @@ Notas operacionais:
 - `SOURCE_URL_REQUIRE_HTTPS`: exige `https://` nas rotas por URL.
 - `SOURCE_URL_ALLOWED_DOMAINS`: domínios permitidos para `arquivo_url` (CSV, ex.: `sharepoint.com`).
 - `SOURCE_URL_USER_AGENT`: User-Agent usado no download por URL.
+- `SOURCE_URL_RETRY_ATTEMPTS`: quantidade de retries no download por URL (além da primeira tentativa).
+- `SOURCE_URL_RETRY_BACKOFF_SECONDS`: backoff base entre retries de download por URL.
+- `SOURCE_URL_RETRY_JITTER_SECONDS`: jitter para reduzir colisão em picos de chamadas.
 
 ## Segurança de Acesso
 
@@ -401,6 +404,19 @@ Endpoints recomendados para n8n:
 - `POST /extrair-carimbo/upload`
 - `POST /debug/visualizar/upload`
 - `POST /extrair-medico-gemini/upload`
+
+Para rotas por URL (`/extrair-medico-gemini/url` e `/extrair-aso-geral/url`), erros agora retornam metadados estruturados úteis para decisão no fluxo:
+
+- `codigo`: código estável do erro (`source_url_timeout`, `source_url_network_error`, `source_url_auth_or_not_found`, etc.)
+- `retryable`: indica se vale retry automático
+- `origem_http_status`: status HTTP retornado pela origem (quando existir)
+- `tentativas_usadas` / `tentativas_maximas`: rastreio de retries internos da API
+
+Sugestão de tratamento no n8n:
+
+- `retryable=true`: aplicar retry automático no node.
+- `codigo=source_url_auth_or_not_found`: não retryar sem gerar novo link.
+- `codigo=source_url_domain_not_allowed` ou `source_url_scheme_https_required`: erro de configuração do fluxo.
 
 Para throughput alto, mantenha imagens desligadas por padrão:
 

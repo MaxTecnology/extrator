@@ -347,10 +347,13 @@ def _fetch_source_file_for_pipeline(
             user_agent=settings.source_url_user_agent,
             allowed_domains_csv=settings.source_url_allowed_domains,
             require_https=bool(settings.source_url_require_https),
+            retry_attempts=settings.source_url_retry_attempts,
+            retry_backoff_seconds=settings.source_url_retry_backoff_seconds,
+            retry_jitter_seconds=settings.source_url_retry_jitter_seconds,
         )
     except SourceUrlFetchError as exc:
         logger.warning("Falha ao baixar arquivo da URL (%s): %s", safe_url, exc.detail)
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_detail_payload()) from exc
 
     file_bytes = fetched.file_bytes
     _enforce_file_size(file_bytes, settings.max_file_size_mb)

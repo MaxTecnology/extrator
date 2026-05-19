@@ -138,6 +138,12 @@ class DebugResponse(BaseModel):
 class ErrorResponse(BaseModel):
     erro: str
     detalhe: str
+    codigo: Optional[str] = None
+    etapa: Optional[str] = None
+    retryable: Optional[bool] = None
+    origem_http_status: Optional[int] = None
+    tentativas_usadas: Optional[int] = None
+    tentativas_maximas: Optional[int] = None
 
 
 class HealthResponse(BaseModel):

@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     source_url_require_https: bool = True
     source_url_allowed_domains: str = "sharepoint.com"
     source_url_user_agent: str = "carimbo-service/1.0"
+    source_url_retry_attempts: int = 2
+    source_url_retry_backoff_seconds: float = 1.0
+    source_url_retry_jitter_seconds: float = 0.3
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

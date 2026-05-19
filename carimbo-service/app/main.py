@@ -28,6 +28,25 @@ def _extract_validation_message(exc: RequestValidationError) -> str:
     return message
 
 
+def _extract_structured_http_detail(detail: object) -> dict[str, object]:
+    if not isinstance(detail, dict):
+        return {}
+    allowed_keys = {
+        "codigo",
+        "etapa",
+        "retryable",
+        "origem_http_status",
+        "tentativas_usadas",
+        "tentativas_maximas",
+    }
+    normalized: dict[str, object] = {}
+    for key in allowed_keys:
+        value = detail.get(key)
+        if value is not None:
+            normalized[key] = value
+    return normalized
+
+
 settings_for_static = get_settings()
 artifacts_dir = Path(settings_for_static.image_artifacts_dir)
 artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -70,7 +89,14 @@ if docs_mode == "protected":
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
     error_tag = "erro_interno" if exc.status_code >= 500 else "erro_requisicao"
-    body = ErrorResponse(erro=error_tag, detalhe=str(exc.detail))
+    detail = exc.detail
+    if isinstance(detail, dict):
+        raw_message = detail.get("detalhe", detail.get("mensagem", "Requisição inválida"))
+        detail_message = str(raw_message)
+    else:
+        detail_message = str(detail)
+    structured = _extract_structured_http_detail(detail)
+    body = ErrorResponse(erro=error_tag, detalhe=detail_message, **structured)
     return JSONResponse(status_code=exc.status_code, content=body.model_dump())
 
 
