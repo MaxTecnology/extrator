@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import unicodedata
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
@@ -348,6 +349,8 @@ def query_soc_by_crm(
         raise SocServiceError(f"SOC HTTP {exc.code}: {details[:300]}") from exc
     except error.URLError as exc:
         raise SocServiceError(f"Falha de conexão no SOC: {exc}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise SocServiceError(f"Timeout de conexão com SOC: {exc}") from exc
 
     try:
         body = raw_body.decode("utf-8")

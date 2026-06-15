@@ -1225,19 +1225,26 @@ async def debug_visualize_upload(
         503: {"model": ErrorResponse},
     },
 )
-def extract_aso_geral_pipeline(
-    payload: AsoGeralExtractRequest,
-    settings: Settings = Depends(get_settings),
+def _execute_aso_geral_pipeline(
+    *,
+    image: Image.Image,
+    origem: Optional[str],
+    drive_item_id: Optional[str],
+    folder_drive_id: Optional[str],
+    folder_name: Optional[str],
+    user_code: Optional[str],
+    folder_path: Optional[str],
+    folder_url: Optional[str],
+    file_name: Optional[str],
+    file_web_url: Optional[str],
+    meta_queued_at: Optional[str],
+    settings: Settings,
 ) -> AsoGeralExtractResponse:
     if not settings.gemini_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GEMINI_API_KEY não configurada",
         )
-
-    file_bytes = _decode_file(payload.arquivo_base64)
-    _enforce_file_size(file_bytes, settings.max_file_size_mb)
-    image = _load_input_image(file_bytes, payload.mime_type, payload.pagina, settings)
 
     pipeline_started_at = time.monotonic()
     gemini_usage_events: list[dict[str, object]] = []
@@ -1282,6 +1289,31 @@ def extract_aso_geral_pipeline(
         exame=AsoExameInfo(**aso_payload["exame"]),
         riscos=AsoRiscosInfo(**aso_payload["riscos"]),
         parecer=AsoParecerInfo(**aso_payload["parecer"]),
+        origem=origem,
+        drive_item_id=drive_item_id,
+        folder_drive_id=folder_drive_id,
+        folder_name=folder_name,
+        user_code=user_code,
+        folder_path=folder_path,
+        folder_url=folder_url,
+        file_name=file_name,
+        file_web_url=file_web_url,
+        meta_queued_at=meta_queued_at,
+        revisao_humana_recomendada=revisao_humana_recomendada,
+        motivos_revisao=motivos_revisao,
+        gemini_telemetria=gemini_telemetria,
+    )
+
+
+def extract_aso_geral_pipeline(
+    payload: AsoGeralExtractRequest,
+    settings: Settings = Depends(get_settings),
+) -> AsoGeralExtractResponse:
+    file_bytes = _decode_file(payload.arquivo_base64)
+    _enforce_file_size(file_bytes, settings.max_file_size_mb)
+    image = _load_input_image(file_bytes, payload.mime_type, payload.pagina, settings)
+    return _execute_aso_geral_pipeline(
+        image=image,
         origem=payload.origem,
         drive_item_id=payload.drive_item_id,
         folder_drive_id=payload.folder_drive_id,
@@ -1292,9 +1324,7 @@ def extract_aso_geral_pipeline(
         file_name=payload.file_name,
         file_web_url=payload.file_web_url,
         meta_queued_at=payload.meta_queued_at,
-        revisao_humana_recomendada=revisao_humana_recomendada,
-        motivos_revisao=motivos_revisao,
-        gemini_telemetria=gemini_telemetria,
+        settings=settings,
     )
 
 
@@ -1333,12 +1363,14 @@ async def extract_aso_geral_upload(
         mime_type_override=mime_type,
         file_bytes=file_bytes,
     )
-    payload = AsoGeralExtractRequest(
-        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+    image = _load_input_image(
+        file_bytes=file_bytes,
         mime_type=resolved_mime_type,
         pagina=max(0, int(pagina)),
-        retornar_imagem_base64=False,
-        retornar_imagem_url=False,
+        settings=settings,
+    )
+    return _execute_aso_geral_pipeline(
+        image=image,
         origem=origem,
         drive_item_id=drive_item_id,
         folder_drive_id=folder_drive_id,
@@ -1349,8 +1381,8 @@ async def extract_aso_geral_upload(
         file_name=file_name,
         file_web_url=file_web_url,
         meta_queued_at=meta_queued_at,
+        settings=settings,
     )
-    return extract_aso_geral_pipeline(payload=payload, settings=settings)
 
 
 @router.post(
@@ -1374,12 +1406,14 @@ def extract_aso_geral_url(
         mime_type_override=payload.mime_type,
         settings=settings,
     )
-    internal_payload = AsoGeralExtractRequest(
-        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+    image = _load_input_image(
+        file_bytes=file_bytes,
         mime_type=resolved_mime_type,
         pagina=max(0, int(payload.pagina)),
-        retornar_imagem_base64=bool(payload.retornar_imagem_base64),
-        retornar_imagem_url=bool(payload.retornar_imagem_url),
+        settings=settings,
+    )
+    return _execute_aso_geral_pipeline(
+        image=image,
         origem=payload.origem,
         drive_item_id=payload.drive_item_id,
         folder_drive_id=payload.folder_drive_id,
@@ -1390,35 +1424,23 @@ def extract_aso_geral_url(
         file_name=payload.file_name,
         file_web_url=payload.file_web_url,
         meta_queued_at=payload.meta_queued_at,
+        settings=settings,
     )
-    return extract_aso_geral_pipeline(payload=internal_payload, settings=settings)
 
 
-@router.post(
-    "/extrair-medico-gemini",
-    response_model=GeminiExtractResponse,
-    dependencies=[Depends(require_api_key_access)],
-    responses={
-        413: {"model": ErrorResponse},
-        422: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-        502: {"model": ErrorResponse},
-        503: {"model": ErrorResponse},
-    },
-)
-def extract_medico_with_gemini_pipeline(
-    payload: GeminiExtractRequest,
-    settings: Settings = Depends(get_settings),
+def _execute_medico_gemini_pipeline(
+    *,
+    image: Image.Image,
+    max_candidatos: int,
+    retornar_imagem_base64: bool,
+    retornar_imagem_url: bool,
+    settings: Settings,
 ) -> GeminiExtractResponse:
     if not settings.gemini_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GEMINI_API_KEY não configurada",
         )
-
-    file_bytes = _decode_file(payload.arquivo_base64)
-    _enforce_file_size(file_bytes, settings.max_file_size_mb)
-    image = _load_input_image(file_bytes, payload.mime_type, payload.pagina, settings)
 
     pipeline_started_at = time.monotonic()
     gemini_usage_events: list[dict[str, object]] = []
@@ -1435,7 +1457,7 @@ def extract_medico_with_gemini_pipeline(
         int(retry_attempts),
         max(0, int(settings.gemini_extraction_retry_attempts_cap)),
     )
-    max_candidates = max(1, min(payload.max_candidatos, settings.gemini_max_candidates, 5))
+    max_candidates = max(1, min(max_candidatos, settings.gemini_max_candidates, 5))
     max_evaluations_cap = max(3, min(12, int(settings.gemini_max_evaluations)))
     max_evaluations = max(3, min(max_evaluations_cap, (max_candidates * 2) + 1))
     original_size = image.size
@@ -1649,8 +1671,8 @@ def extract_medico_with_gemini_pipeline(
     carimbo_base64, carimbo_url = _build_image_outputs(
         selected_crop,
         settings=settings,
-        include_base64=payload.retornar_imagem_base64,
-        include_url=payload.retornar_imagem_url,
+        include_base64=retornar_imagem_base64,
+        include_url=retornar_imagem_url,
         artifact_prefix="carimbo_gemini",
     )
 
@@ -1674,6 +1696,34 @@ def extract_medico_with_gemini_pipeline(
         revisao_humana_recomendada=revisao_humana_recomendada,
         soc_validacao=_soc_validation_model(soc_validation),
         gemini_telemetria=gemini_telemetria,
+    )
+
+
+@router.post(
+    "/extrair-medico-gemini",
+    response_model=GeminiExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def extract_medico_with_gemini_pipeline(
+    payload: GeminiExtractRequest,
+    settings: Settings = Depends(get_settings),
+) -> GeminiExtractResponse:
+    file_bytes = _decode_file(payload.arquivo_base64)
+    _enforce_file_size(file_bytes, settings.max_file_size_mb)
+    image = _load_input_image(file_bytes, payload.mime_type, payload.pagina, settings)
+    return _execute_medico_gemini_pipeline(
+        image=image,
+        max_candidatos=payload.max_candidatos,
+        retornar_imagem_base64=payload.retornar_imagem_base64,
+        retornar_imagem_url=payload.retornar_imagem_url,
+        settings=settings,
     )
 
 
@@ -1705,15 +1755,19 @@ async def extract_medico_with_gemini_upload(
         mime_type_override=mime_type,
         file_bytes=file_bytes,
     )
-    payload = GeminiExtractRequest(
-        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+    image = _load_input_image(
+        file_bytes=file_bytes,
         mime_type=resolved_mime_type,
         pagina=max(0, int(pagina)),
+        settings=settings,
+    )
+    return _execute_medico_gemini_pipeline(
+        image=image,
         max_candidatos=max(1, min(int(max_candidatos), 5)),
         retornar_imagem_base64=bool(retornar_imagem_base64),
         retornar_imagem_url=bool(retornar_imagem_url),
+        settings=settings,
     )
-    return extract_medico_with_gemini_pipeline(payload=payload, settings=settings)
 
 
 @router.post(
@@ -1737,12 +1791,16 @@ def extract_medico_with_gemini_url(
         mime_type_override=payload.mime_type,
         settings=settings,
     )
-    internal_payload = GeminiExtractRequest(
-        arquivo_base64=base64.b64encode(file_bytes).decode("utf-8"),
+    image = _load_input_image(
+        file_bytes=file_bytes,
         mime_type=resolved_mime_type,
         pagina=max(0, int(payload.pagina)),
+        settings=settings,
+    )
+    return _execute_medico_gemini_pipeline(
+        image=image,
         max_candidatos=max(1, min(int(payload.max_candidatos), 5)),
         retornar_imagem_base64=bool(payload.retornar_imagem_base64),
         retornar_imagem_url=bool(payload.retornar_imagem_url),
+        settings=settings,
     )
-    return extract_medico_with_gemini_pipeline(payload=internal_payload, settings=settings)

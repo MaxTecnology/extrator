@@ -77,12 +77,17 @@ if docs_mode == "protected":
     @app.middleware("http")
     async def docs_api_key_middleware(request: Request, call_next):
         if request.url.path in protected_docs_paths:
-            enforce_api_key_access(
-                request=request,
-                settings=settings_for_static,
-                apply_rate_limit=False,
-                force_require=True,
-            )
+            try:
+                enforce_api_key_access(
+                    request=request,
+                    settings=settings_for_static,
+                    apply_rate_limit=False,
+                    force_require=True,
+                )
+            except HTTPException as exc:
+                error_tag = "erro_interno" if exc.status_code >= 500 else "erro_requisicao"
+                body = ErrorResponse(erro=error_tag, detalhe=str(exc.detail))
+                return JSONResponse(status_code=exc.status_code, content=body.model_dump())
         return await call_next(request)
 
 
