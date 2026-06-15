@@ -651,6 +651,7 @@ def _run_medico_pipeline_for_orientation(
     retry_backoff_seconds: float,
     retry_jitter_seconds: float,
     gemini_usage_events: list[dict[str, object]],
+    pipeline_deadline: Optional[float] = None,
 ) -> _MedicoOrientationRunResult:
     image_width, image_height = image.size
     selected_bbox: Optional[BBoxTuple] = None
@@ -817,6 +818,12 @@ def _run_medico_pipeline_for_orientation(
         message = "Gemini não retornou candidatos válidos. Usando fallback OpenCV."
 
     for bbox, proposal_score, origin, detected_flag, fallback_flag, proposal_reason in ranked_proposals:
+        if pipeline_deadline is not None and time.monotonic() > pipeline_deadline:
+            logger.warning(
+                "Pipeline medico: budget esgotado em %s. Interrompendo avaliacao de candidatos.",
+                orientation_mode,
+            )
+            break
         crop = image.crop((bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]))
         processed_crop = preprocess_stamp(crop)
 
@@ -1458,14 +1465,33 @@ def _execute_medico_gemini_pipeline(
         max(0, int(settings.gemini_extraction_retry_attempts_cap)),
     )
     max_candidates = max(1, min(max_candidatos, settings.gemini_max_candidates, 5))
-    max_evaluations_cap = max(3, min(12, int(settings.gemini_max_evaluations)))
-    max_evaluations = max(3, min(max_evaluations_cap, (max_candidates * 2) + 1))
+    max_evaluations_cap = max(1, min(12, int(settings.gemini_max_evaluations)))
+    max_evaluations = max(1, min(max_evaluations_cap, (max_candidates * 2) + 1))
+    pipeline_deadline = pipeline_started_at + float(settings.gemini_pipeline_timeout_seconds)
     original_size = image.size
     orientation_results: list[_MedicoOrientationRunResult] = []
     best_run: Optional[_MedicoOrientationRunResult] = None
     orientation_strategy = "orientacao_0_180_prioritaria"
 
+    logger.info(
+        "Pipeline medico: iniciando. timeout_gemini=%ds, pipeline_budget=%ds, "
+        "max_evaluations=%d, max_candidates=%d, detection_enabled=%s",
+        timeout,
+        settings.gemini_pipeline_timeout_seconds,
+        max_evaluations,
+        max_candidates,
+        settings.gemini_detection_enabled,
+    )
+
     for orientation_mode in ("rot_0", "rot_180"):
+        elapsed = time.monotonic() - pipeline_started_at
+        if best_run is not None and time.monotonic() > pipeline_deadline:
+            logger.warning(
+                "Pipeline medico: budget esgotado (%.1fs). Abortando orientacao %s.",
+                elapsed,
+                orientation_mode,
+            )
+            break
         if (
             best_run is not None
             and best_run.success
@@ -1475,6 +1501,7 @@ def _execute_medico_gemini_pipeline(
             and not best_run.selected_fallback_region
         ):
             break
+        logger.info("Pipeline medico: iniciando orientacao=%s (elapsed=%.1fs)", orientation_mode, elapsed)
         oriented_image = apply_orientation(image, orientation_mode)
         try:
             run_result = _run_medico_pipeline_for_orientation(
@@ -1489,6 +1516,7 @@ def _execute_medico_gemini_pipeline(
                 retry_backoff_seconds=retry_backoff_seconds,
                 retry_jitter_seconds=retry_jitter_seconds,
                 gemini_usage_events=gemini_usage_events,
+                pipeline_deadline=pipeline_deadline,
             )
         except cv2.error as exc:
             raise HTTPException(
@@ -1498,6 +1526,13 @@ def _execute_medico_gemini_pipeline(
         orientation_results.append(run_result)
         if run_result.success and (best_run is None or run_result.selection_score > best_run.selection_score):
             best_run = run_result
+        logger.info(
+            "Pipeline medico: orientacao=%s concluida. score=%.3f, valido=%s, elapsed=%.1fs",
+            orientation_mode,
+            run_result.selected_score,
+            run_result.selected_medico.valido if run_result.selected_medico else False,
+            time.monotonic() - pipeline_started_at,
+        )
 
     needs_sideways_fallback = (
         best_run is None
@@ -1511,6 +1546,15 @@ def _execute_medico_gemini_pipeline(
     if needs_sideways_fallback:
         orientation_strategy = "orientacao_0_180_com_fallback_90_270"
         for orientation_mode in ("rot_90", "rot_270"):
+            elapsed = time.monotonic() - pipeline_started_at
+            if best_run is not None and time.monotonic() > pipeline_deadline:
+                logger.warning(
+                    "Pipeline medico: budget esgotado (%.1fs). Abortando fallback orientacao %s.",
+                    elapsed,
+                    orientation_mode,
+                )
+                break
+            logger.info("Pipeline medico: iniciando orientacao=%s (elapsed=%.1fs)", orientation_mode, elapsed)
             oriented_image = apply_orientation(image, orientation_mode)
             try:
                 run_result = _run_medico_pipeline_for_orientation(
@@ -1525,6 +1569,7 @@ def _execute_medico_gemini_pipeline(
                     retry_backoff_seconds=retry_backoff_seconds,
                     retry_jitter_seconds=retry_jitter_seconds,
                     gemini_usage_events=gemini_usage_events,
+                    pipeline_deadline=pipeline_deadline,
                 )
             except cv2.error as exc:
                 raise HTTPException(
@@ -1536,6 +1581,13 @@ def _execute_medico_gemini_pipeline(
                 best_run is None or run_result.selection_score > best_run.selection_score
             ):
                 best_run = run_result
+            logger.info(
+                "Pipeline medico: orientacao=%s concluida. score=%.3f, valido=%s, elapsed=%.1fs",
+                orientation_mode,
+                run_result.selected_score,
+                run_result.selected_medico.valido if run_result.selected_medico else False,
+                time.monotonic() - pipeline_started_at,
+            )
             if (
                 run_result.success
                 and run_result.selected_medico is not None

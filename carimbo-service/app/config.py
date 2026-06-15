@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: int = 30
     gemini_max_candidates: int = 3
     gemini_max_evaluations: int = 6
+    gemini_pipeline_timeout_seconds: int = 120
     gemini_detection_retry_attempts_cap: int = 2
     gemini_extraction_retry_attempts_cap: int = 1
     gemini_retry_attempts: int = 3
