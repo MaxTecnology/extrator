@@ -620,9 +620,6 @@ def _build_bottom_up_extraction_windows(crop: Image.Image) -> list[tuple[Image.I
         (0.00, 0.08, 0.84, 0.74, 0.20, "janela_assinatura_superior_esquerda"),
         # Janela mais ampla para cobrir variações de layout no rodapé.
         (0.00, 0.18, 0.90, 0.88, 0.14, "janela_assinatura_central_esquerda"),
-        # Mantém janela inferior para documentos onde o carimbo cai mais abaixo.
-        (0.00, 0.48, 0.88, 1.00, 0.10, "janela_rodape_48_88"),
-        (0.00, 0.00, 1.00, 1.00, 0.00, "janela_completa"),
     ]
     windows: list[tuple[Image.Image, float, str]] = []
     for x0_r, y0_r, x1_r, y1_r, bonus, label in windows_spec:
