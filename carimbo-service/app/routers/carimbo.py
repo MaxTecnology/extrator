@@ -778,6 +778,8 @@ def _run_medico_pipeline_for_orientation(
         bottom_priority_y_start=bottom_y_start,
     )
     for region_index, region_bbox in enumerate(fallback_bottom_left):
+        if len(ranked_proposals) >= max_evaluations:
+            break
         ranked_proposals.append(
             (
                 region_bbox,
@@ -788,8 +790,6 @@ def _run_medico_pipeline_for_orientation(
                 "fallback_rodape_esquerdo_prioritario",
             )
         )
-        if len(ranked_proposals) >= max_evaluations:
-            break
 
     opencv_bbox = detection.bbox if detection.bbox is not None else detection.fallback_bbox
     opencv_variants = (
@@ -798,6 +798,8 @@ def _run_medico_pipeline_for_orientation(
         else [opencv_bbox]
     )
     for variant_index, variant_bbox in enumerate(opencv_variants):
+        if len(ranked_proposals) >= max_evaluations:
+            break
         opencv_score = max(0.0, detection.confidence - (0.02 * variant_index))
         ranked_proposals.append(
             (
@@ -809,8 +811,6 @@ def _run_medico_pipeline_for_orientation(
                 detection.reason or "opencv_fallback",
             )
         )
-        if len(ranked_proposals) >= max_evaluations:
-            break
 
     if not gemini_candidates:
         strategy = "opencv_fallback_apos_gemini"
@@ -1538,10 +1538,7 @@ def _execute_medico_gemini_pipeline(
         best_run is None
         or not best_run.success
         or best_run.selected_medico is None
-        or (
-            (not best_run.selected_medico.valido and best_run.selected_score < 0.86)
-            or best_run.selected_score < 0.72
-        )
+        or best_run.selected_score < 0.72
     )
     if needs_sideways_fallback:
         orientation_strategy = "orientacao_0_180_com_fallback_90_270"
