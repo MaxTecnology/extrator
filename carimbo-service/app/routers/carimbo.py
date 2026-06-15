@@ -1213,18 +1213,6 @@ async def debug_visualize_upload(
     )
 
 
-@router.post(
-    "/extrair-aso-geral",
-    response_model=AsoGeralExtractResponse,
-    dependencies=[Depends(require_api_key_access)],
-    responses={
-        413: {"model": ErrorResponse},
-        422: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-        502: {"model": ErrorResponse},
-        503: {"model": ErrorResponse},
-    },
-)
 def _execute_aso_geral_pipeline(
     *,
     image: Image.Image,
@@ -1305,6 +1293,18 @@ def _execute_aso_geral_pipeline(
     )
 
 
+@router.post(
+    "/extrair-aso-geral",
+    response_model=AsoGeralExtractResponse,
+    dependencies=[Depends(require_api_key_access)],
+    responses={
+        413: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        500: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
 def extract_aso_geral_pipeline(
     payload: AsoGeralExtractRequest,
     settings: Settings = Depends(get_settings),

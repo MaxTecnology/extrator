@@ -631,7 +631,7 @@ Regras:
 - Não invente valores.
 - Campo ilegível: "**".
 - Campo ausente/vazio: "Ausente".
-- CPF: priorize apenas CPF, formato XXX.XXX.XXX-XX.
+- CPF: priorize apenas CPF, formato XXX.XXX.XXX-XX. Alguns documentos usam campo "RG/CPF" onde o RG fica em branco e o valor aparece como "/XXX.XXX.XXX-XX" (barra inicial sem RG); nesse caso extraia o CPF normalmente ignorando a barra.
 - Data final em DD/MM/AAAA; se vier DD/MM/AA, complete para 20AA.
 - Parecer: use SOMENTE os 5 valores permitidos.
 - Se existir apenas parecer geral, os específicos devem ser "Não Aplicável".
